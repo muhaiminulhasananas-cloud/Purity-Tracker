@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">متتبع النقاء</string>
+    <string name="accessibility_service_description">تحمي هذه الخدمة سلسلة التعافي الخاصة بك من التجاوز أو إلغاء التثبيت.</string>
+    <string name="nav_home">الرئيسية</string>
+    <string name="nav_history">السجل</string>
+    <string name="nav_focus">التركيز</string>
+    <string name="nav_ai">الذكاء الاصطناعي</string>
+    <string name="nav_community">المجتمع</string>
+    <string name="nav_profile">الحساب</string>
+    <string name="nav_salah">متتبع الصلاة</string>
+</resources>

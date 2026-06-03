@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Rastreador de Pureza</string>
+    <string name="accessibility_service_description">Este servicio protege su racha de recuperación evitando desinstalaciones.</string>
+    <string name="nav_home">Inicio</string>
+    <string name="nav_history">Historial</string>
+    <string name="nav_focus">Enfoque</string>
+    <string name="nav_ai">IA</string>
+    <string name="nav_community">Comunidad</string>
+    <string name="nav_profile">Cuenta</string>
+    <string name="nav_salah">Rastreador de Salah</string>
+</resources>

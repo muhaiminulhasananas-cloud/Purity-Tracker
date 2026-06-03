@@ -1,0 +1,6 @@
+{
+  "name": "Purity Tracker",
+  "description": "A habit tracking application with milestones and a focus mode.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

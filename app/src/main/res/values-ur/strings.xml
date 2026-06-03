@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">پاکیزگی ٹریکر</string>
+    <string name="accessibility_service_description">یہ سروس آپ کے بحالی کے سلسلے کو نظرانداز یا ان انسٹال ہونے سے بچاتی ہے۔</string>
+    <string name="nav_home">ہوم</string>
+    <string name="nav_history">تاریخ</string>
+    <string name="nav_focus">فوکس</string>
+    <string name="nav_ai">اے آئی</string>
+    <string name="nav_community">کمیونٹی</string>
+    <string name="nav_profile">اکاؤنٹ</string>
+    <string name="nav_salah">نماز ٹریکر</string>
+</resources>

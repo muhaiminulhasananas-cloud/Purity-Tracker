@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">पवित्रता ट्रैकर</string>
+    <string name="accessibility_service_description">यह सेवा आपके रिकवरी स्ट्रीक को बाईपास या अनइंस्टॉल होने से बचाती है।</string>
+    <string name="nav_home">होम</string>
+    <string name="nav_history">इतिहास</string>
+    <string name="nav_focus">फोकस</string>
+    <string name="nav_ai">एआई</string>
+    <string name="nav_community">समुदाय</string>
+    <string name="nav_profile">खाता</string>
+    <string name="nav_salah">सलाह ट्रैकर</string>
+</resources>
