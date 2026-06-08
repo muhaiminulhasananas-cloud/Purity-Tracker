@@ -6,7 +6,12 @@ import android.content.Intent
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val prefs = context.getSharedPreferences("VpnPrefs", Context.MODE_PRIVATE)
+        val safeContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            context.createDeviceProtectedStorageContext()
+        } else {
+            context
+        }
+        val prefs = safeContext.getSharedPreferences("VpnPrefs", Context.MODE_PRIVATE)
         val isVpnRunning = prefs.getBoolean("vpn_is_running", false)
         
         if (isVpnRunning) {
@@ -23,5 +28,12 @@ class BootReceiver : BroadcastReceiver() {
                 } catch (e: Exception) {}
             }
         }
+        
+        try {
+            val bgIntent = Intent(context, BackgroundNotificationService::class.java)
+            context.startService(bgIntent)
+        } catch(e: Exception) {}
+        
+        PrayerScheduler.scheduleDailyPrayers(context)
     }
 }

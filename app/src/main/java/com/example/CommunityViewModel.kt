@@ -40,6 +40,27 @@ data class LeaderboardUser(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+data class Challenge(
+    val id: String = "",
+    val title: String = "",
+    val description: String = "",
+    val durationDays: Int = 10,
+    val participantCount: Int = 0,
+    val participants: List<String> = emptyList(),
+    val creatorName: String = "",
+    val creatorEmail: String = "",
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+data class ChallengeMessage(
+    val id: String = "",
+    val challengeId: String = "",
+    val senderName: String = "",
+    val senderEmail: String = "",
+    val message: String = "",
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 class CommunityViewModel : ViewModel() {
     private val db = FirebaseFirestore.getInstance()
     private val auth = FirebaseAuth.getInstance()
@@ -52,10 +73,17 @@ class CommunityViewModel : ViewModel() {
     
     private val _comments = MutableStateFlow<Map<String, List<Comment>>>(emptyMap())
     val comments = _comments.asStateFlow()
+
+    private val _challenges = MutableStateFlow<List<Challenge>>(emptyList())
+    val challenges = _challenges.asStateFlow()
+
+    private val _challengeMessages = MutableStateFlow<Map<String, List<ChallengeMessage>>>(emptyMap())
+    val challengeMessages = _challengeMessages.asStateFlow()
     
     init {
         fetchPosts()
         fetchLeaderboard()
+        fetchChallenges()
     }
     
     private fun fetchPosts() {
@@ -92,6 +120,142 @@ class CommunityViewModel : ViewModel() {
                     _leaders.value = leaderList
                 }
             }
+    }
+
+    private fun fetchChallenges() {
+        db.collection("challenges")
+            .orderBy("timestamp", Query.Direction.DESCENDING)
+            .addSnapshotListener { snapshot, e ->
+                if (e != null) {
+                    Log.w("CommunityViewModel", "Challenges listen failed.", e)
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    var list = snapshot.documents.mapNotNull {
+                        it.toObject(Challenge::class.java)?.copy(id = it.id)
+                    }
+                    // Auto-seed some helpful community challenges if empty
+                    if (list.isEmpty()) {
+                        seedDefaultChallenges()
+                    }
+                    _challenges.value = list
+                }
+            }
+    }
+
+    private fun seedDefaultChallenges() {
+        val defaults = listOf(
+            Challenge(
+                title = "১০০ দিনের নো-ফ্যাপ চ্যালেঞ্জ 🏆",
+                description = "আসক্তিমুক্ত পবিত্র জীবন গঠনের শ্রেষ্ঠ যুদ্ধ। আমাদের সাথে যোগ দিয়ে নিজেকে পরিবর্তন করুন!",
+                durationDays = 100,
+                participantCount = 0,
+                participants = emptyList(),
+                creatorName = "System",
+                creatorEmail = "system",
+                timestamp = System.currentTimeMillis() - 1000
+            ),
+            Challenge(
+                title = "৩০ দিনের রুকইয়াহ্ ও আমল চ্যালেঞ্জ 🕋",
+                description = "প্রতিদিন আল্লাহর যিকির, নামাজ এবং রুকইয়াহ্ শ্রবণের মাধ্যমে মন পবিত্র রাখুন।",
+                durationDays = 30,
+                participantCount = 0,
+                participants = emptyList(),
+                creatorName = "System",
+                creatorEmail = "system",
+                timestamp = System.currentTimeMillis() - 500
+            ),
+            Challenge(
+                title = "১০ দিনের নো-সোশ্যাল মিডিয়া চ্যালেঞ্জ 📵",
+                description = "১০ দিন কোনো সোশ্যাল মিডিয়া স্ক্রোলিং না করে মানসিক শান্তি ফিরিয়ে আনুন।",
+                durationDays = 10,
+                participantCount = 0,
+                participants = emptyList(),
+                creatorName = "System",
+                creatorEmail = "system",
+                timestamp = System.currentTimeMillis()
+            )
+        )
+        for (challenge in defaults) {
+            db.collection("challenges").add(challenge)
+        }
+    }
+
+    fun createChallenge(title: String, description: String, durationDays: Int) {
+        val user = auth.currentUser ?: return
+        val challenge = Challenge(
+            title = title,
+            description = description,
+            durationDays = durationDays,
+            participantCount = 1,
+            participants = listOf(user.email ?: ""),
+            creatorName = user.displayName ?: "Anonymous Warrior",
+            creatorEmail = user.email ?: "",
+            timestamp = System.currentTimeMillis()
+        )
+        db.collection("challenges").add(challenge)
+    }
+
+    fun joinChallenge(challengeId: String) {
+        val user = auth.currentUser ?: return
+        val email = user.email ?: ""
+        val challengeRef = db.collection("challenges").document(challengeId)
+        db.runTransaction { transaction ->
+            val snapshot = transaction.get(challengeRef)
+            val participants = snapshot.get("participants") as? List<*> ?: emptyList<Any>()
+            val participantList = participants.mapNotNull { it as? String }.toMutableList()
+            if (!participantList.contains(email)) {
+                participantList.add(email)
+                transaction.update(challengeRef, "participants", participantList)
+                transaction.update(challengeRef, "participantCount", participantList.size)
+            }
+        }.addOnSuccessListener {
+            Log.d("CommunityViewModel", "Successfully joined challenge")
+        }
+    }
+
+    fun leaveChallenge(challengeId: String) {
+        val user = auth.currentUser ?: return
+        val email = user.email ?: ""
+        val challengeRef = db.collection("challenges").document(challengeId)
+        db.runTransaction { transaction ->
+            val snapshot = transaction.get(challengeRef)
+            val participants = snapshot.get("participants") as? List<*> ?: emptyList<Any>()
+            val participantList = participants.mapNotNull { it as? String }.toMutableList()
+            if (participantList.contains(email)) {
+                participantList.remove(email)
+                transaction.update(challengeRef, "participants", participantList)
+                transaction.update(challengeRef, "participantCount", participantList.size)
+            }
+        }
+    }
+
+    fun fetchChallengeMessages(challengeId: String) {
+        db.collection("challenges").document(challengeId).collection("messages")
+            .orderBy("timestamp", Query.Direction.ASCENDING)
+            .addSnapshotListener { snapshot, e ->
+                if (e != null) return@addSnapshotListener
+                if (snapshot != null) {
+                    val msgList = snapshot.documents.mapNotNull {
+                        it.toObject(ChallengeMessage::class.java)?.copy(id = it.id, challengeId = challengeId)
+                    }
+                    _challengeMessages.value = _challengeMessages.value.toMutableMap().apply {
+                        put(challengeId, msgList)
+                    }
+                }
+            }
+    }
+
+    fun sendChallengeMessage(challengeId: String, text: String) {
+        val user = auth.currentUser ?: return
+        val msg = ChallengeMessage(
+            challengeId = challengeId,
+            senderName = user.displayName ?: "Anonymous Warrior",
+            senderEmail = user.email ?: "",
+            message = text,
+            timestamp = System.currentTimeMillis()
+        )
+        db.collection("challenges").document(challengeId).collection("messages").add(msg)
     }
 
     fun syncUserStreak(streakMs: Long) {

@@ -20,6 +20,10 @@ import retrofit2.http.POST
 import retrofit2.http.Query
 import retrofit2.http.Streaming
 
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
 @Serializable
 data class GenerateContentRequest(
     val contents: List<Content>,
@@ -60,6 +64,13 @@ interface GeminiApiService {
         @Query("key") apiKey: String,
         @Body request: GenerateContentRequest
     ): GenerateContentResponse
+
+    @POST("v1beta/models/gemini-3.5-flash:streamGenerateContent")
+    @Streaming
+    suspend fun generateContentStream(
+        @Query("key") apiKey: String,
+        @Body request: GenerateContentRequest
+    ): ResponseBody
 }
 
 object RetrofitClient {
@@ -82,12 +93,21 @@ object RetrofitClient {
     }
 }
 
-data class ChatMessage(val text: String, val isUser: Boolean)
+data class ChatMessage(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val text: String,
+    val isUser: Boolean,
+    val isLiked: Boolean? = null,
+    val isStreaming: Boolean = false
+)
 
 class AiViewModel : ViewModel() {
     private val _messages = MutableStateFlow<List<ChatMessage>>(
         listOf(
-            ChatMessage("আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ! আমি আপনার ইসলামিক কাউনসিলর এবং আসক্তি নিরাময় সঙ্গী। আমি আপনাকে খারাপ অভ্যাস, পর্নোগ্রাফি এবং নেতিবাচক চিন্তার ফাঁদ থেকে মুক্ত হয়ে একটি পবিত্র, সচেতন এবং আধ্যাত্মিক জীবন গড়ে তুলতে সাহায্য করার জন্য ও আপনার রুকইয়াহ্ হিসেবে নির্দেশনা দিতে নিয়োজিত রয়েছি ইনশাআল্লাহ। আপনার যেকোনো মানসিক বা আত্মিক অনুভূতি কোনো দ্বিধা ছাড়াই সরাসরি লিখে শেয়ার করতে পারেন, যা সম্পূর্ণভাবে গোপন থাকবে।", false)
+            ChatMessage(
+                text = "আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ! আমি আপনার ইসলামিক কাউনসিলর এবং আসক্তি নিরাময় সঙ্গী। আমি আপনাকে খারাপ অভ্যাস, পর্নোগ্রাফি এবং নেতিবাচক চিন্তার ফাঁদ থেকে মুক্ত হয়ে একটি পবিত্র, সচেতন এবং আধ্যাত্মিক জীবন গড়ে তুলতে সাহায্য করার জন্য ও আপনার রুকইয়াহ্ হিসেবে নির্দেশনা দিতে নিয়োজিত রয়েছি ইনশাআল্লাহ। আপনার যেকোনো মানসিক বা আত্মিক অনুভূতি কোনো দ্বিধা ছাড়াই সরাসরি লিখে শেয়ার করতে পারেন, যা সম্পূর্ণভাবে গোপন থাকবে।",
+                isUser = false
+            )
         )
     )
     val messages = _messages.asStateFlow()
@@ -95,40 +115,144 @@ class AiViewModel : ViewModel() {
     private val _isLoading = MutableStateFlow(false)
     val isLoading = _isLoading.asStateFlow()
 
+    fun toggleLike(messageId: String, isLike: Boolean) {
+        _messages.value = _messages.value.map { msg ->
+            if (msg.id == messageId) {
+                // If clicked again, set to null (neutralize), otherwise set to isLike
+                val newLiked = if (msg.isLiked == isLike) null else isLike
+                msg.copy(isLiked = newLiked)
+            } else {
+                msg
+            }
+        }
+    }
+
     fun sendMessage(prompt: String) {
         if (prompt.isBlank()) return
         
-        val userMsg = ChatMessage(prompt, true)
+        val userMsg = ChatMessage(text = prompt, isUser = true)
         _messages.value = _messages.value + userMsg
         _isLoading.value = true
 
         viewModelScope.launch {
-            val response = generateContent(prompt)
-            _messages.value = _messages.value + ChatMessage(response, false)
-            _isLoading.value = false
-        }
-    }
+            val apiKey = BuildConfig.GEMINI_API_KEY
+            if (apiKey == "MY_GEMINI_API_KEY" || apiKey.isBlank()) {
+                _isLoading.value = false
+                _messages.value = _messages.value + ChatMessage(
+                    text = LanguageStore.get("ai_missing_key"),
+                    isUser = false
+                )
+                return@launch
+            }
 
-    private suspend fun generateContent(prompt: String): String = withContext(Dispatchers.IO) {
-        val apiKey = BuildConfig.GEMINI_API_KEY
-        if (apiKey == "MY_GEMINI_API_KEY" || apiKey.isBlank()) {
-            return@withContext "দয়া করে এআই স্টুডিও এর 'Secrets' প্যানেলে গিয়ে 'GEMINI_API_KEY' নামে একটি ভেরিয়েবল তৈরি করে আপনার জেমিনি এপিআই-কী (API Key) সেট করুন।"
-        }
-        
-        val request = GenerateContentRequest(
-            contents = listOf(Content(
-                parts = listOf(Part(text = prompt))
-            )),
-            systemInstruction = Content(
-                parts = listOf(Part(text = "You are an Islamic counselor and addiction recovery companion. Your goal is to help users overcome bad habits, pornography, and negative thoughts, and guide them towards a pure, conscious, and spiritual life. You should answer in the SAME language the user uses to ask the question (e.g. if they ask in Bengali, reply in Bengali). Keep responses compassionate, encouraging, and based on Islamic principles."))
+            val request = GenerateContentRequest(
+                contents = listOf(Content(
+                    parts = listOf(Part(text = prompt))
+                )),
+                systemInstruction = Content(
+                    parts = listOf(Part(text = "You are an Islamic counselor and addiction recovery companion. Your goal is to help users overcome bad habits, pornography, and negative thoughts, and guide them towards a pure, conscious, and spiritual life. You should answer in the SAME language the user uses to ask the question (e.g. if they ask in Bengali, reply in Bengali). Keep responses compassionate, encouraging, and based on Islamic principles."))
+                )
             )
-        )
-        
-        try {
-            val response = RetrofitClient.service.generateContent(apiKey, request)
-            response.candidates.firstOrNull()?.content?.parts?.firstOrNull()?.text ?: "No response text"
-        } catch (e: Exception) {
-            "Error: ${e.message}"
+
+            try {
+                // Fetch direct streaming response body from service
+                val responseBody = withContext(Dispatchers.IO) {
+                    RetrofitClient.service.generateContentStream(apiKey, request)
+                }
+
+                _isLoading.value = false
+
+                // Add an empty AI message that we will stream text additions into
+                val aiMessageId = java.util.UUID.randomUUID().toString()
+                var accumulatedText = ""
+                val aiMsg = ChatMessage(id = aiMessageId, text = "", isUser = false, isStreaming = true)
+                _messages.value = _messages.value + aiMsg
+
+                withContext(Dispatchers.IO) {
+                    responseBody.byteStream().bufferedReader().use { reader ->
+                        val buffer = StringBuilder()
+                        var braceCount = 0
+                        var inString = false
+                        var escape = false
+
+                        var charCode: Int
+                        while (reader.read().also { charCode = it } != -1) {
+                            val c = charCode.toChar()
+                            if (braceCount > 0) {
+                                buffer.append(c)
+                            }
+                            if (escape) {
+                                escape = false
+                                continue
+                            }
+                            if (c == '\\') {
+                                escape = true
+                                continue
+                            }
+                            if (c == '"') {
+                                inString = !inString
+                                continue
+                            }
+                            if (!inString) {
+                                if (c == '{') {
+                                    if (braceCount == 0) {
+                                        buffer.append(c)
+                                    }
+                                    braceCount++
+                                } else if (c == '}') {
+                                    braceCount--
+                                    if (braceCount == 0) {
+                                        val jsonStr = buffer.toString()
+                                        buffer.clear()
+                                        try {
+                                            val element = Json.parseToJsonElement(jsonStr).jsonObject
+                                            val text = element["candidates"]?.jsonArray
+                                                ?.getOrNull(0)?.jsonObject
+                                                ?.get("content")?.jsonObject
+                                                ?.get("parts")?.jsonArray
+                                                ?.getOrNull(0)?.jsonObject
+                                                ?.get("text")?.jsonPrimitive?.content
+                                            if (text != null) {
+                                                accumulatedText += text
+                                                val currentText = accumulatedText
+                                                withContext(Dispatchers.Main) {
+                                                    _messages.value = _messages.value.map { msg ->
+                                                        if (msg.id == aiMessageId) {
+                                                            msg.copy(text = currentText)
+                                                        } else {
+                                                            msg
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } catch (e: Exception) {
+                                            e.printStackTrace()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Finish streaming
+                withContext(Dispatchers.Main) {
+                    _messages.value = _messages.value.map { msg ->
+                        if (msg.id == aiMessageId) {
+                            msg.copy(isStreaming = false)
+                        } else {
+                            msg
+                        }
+                    }
+                }
+
+            } catch (e: Exception) {
+                _isLoading.value = false
+                _messages.value = _messages.value + ChatMessage(
+                    text = "${LanguageStore.get("ai_connection_error")} (${e.localizedMessage})",
+                    isUser = false
+                )
+            }
         }
     }
 }

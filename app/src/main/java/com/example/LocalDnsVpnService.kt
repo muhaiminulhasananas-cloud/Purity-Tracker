@@ -11,15 +11,38 @@ class LocalDnsVpnService : VpnService() {
         const val ACTION_START = "com.example.START_VPN"
         const val ACTION_STOP = "com.example.STOP_VPN"
         var isRunning = false
+
+        fun isVpnInterfaceUp(): Boolean {
+            try {
+                val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+                if (interfaces != null) {
+                    for (intf in java.util.Collections.list(interfaces)) {
+                        if (intf.isUp && (intf.name.contains("tun") || intf.name.contains("ppp") || intf.name.contains("p2p") || intf.name.contains("vpn"))) {
+                            return true
+                        }
+                    }
+                }
+            } catch (e: Exception) {}
+            return false
+        }
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
+
+    private fun getSafePrefs(): android.content.SharedPreferences {
+        val safeContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            createDeviceProtectedStorageContext()
+        } else {
+            this
+        }
+        return safeContext.getSharedPreferences("VpnPrefs", android.content.Context.MODE_PRIVATE)
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // If the service receives STOP, don't stop it if protection should be permanent!
         // The user wants it to be impossible to turn off normally.
         if (intent?.action == ACTION_STOP) {
-            val prefs = getSharedPreferences("VpnPrefs", android.content.Context.MODE_PRIVATE)
+            val prefs = getSafePrefs()
             val isLocked = prefs.getBoolean("vpn_is_running", true)
             // Still allow programmatic stop if we really need it, but keep state
             // Let's just always restart it.
@@ -57,8 +80,29 @@ class LocalDnsVpnService : VpnService() {
 
             vpnInterface = builder.establish()
 
+            // Start a backend thread to drain the interface.
+            // On some devices, failing to read from the established ParcelFileDescriptor
+            // causes the system to close the interface, resulting in the VPN turning off.
+            val fd = vpnInterface?.fileDescriptor
+            if (fd != null) {
+                Thread {
+                    try {
+                        val input = java.io.FileInputStream(fd)
+                        val buffer = ByteArray(32768)
+                        while (this.vpnInterface != null) {
+                            val read = input.read(buffer)
+                            if (read <= 0) {
+                                Thread.sleep(200)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("VPN_SERVICE", "Packet drain loop stopped", e)
+                    }
+                }.start()
+            }
+
             // Save state so BootReceiver knows to restart it
-            val prefs = getSharedPreferences("VpnPrefs", android.content.Context.MODE_PRIVATE)
+            val prefs = getSafePrefs()
             prefs.edit().putBoolean("vpn_is_running", true).apply()
 
             // START FOREGROUND NOTIFICATION
@@ -69,13 +113,18 @@ class LocalDnsVpnService : VpnService() {
                 nm.createNotificationChannel(channel)
             }
             val notif = androidx.core.app.NotificationCompat.Builder(this, channelId)
-                .setSmallIcon(android.R.drawable.ic_secure)
+                .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
                 .setContentTitle("Guardian Shield is Active")
                 .setContentText("Your internet is protected. Tap to meditate for 15 minutes.")
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .build()
-            startForeground(1, notif)
+                
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                startForeground(1, notif, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(1, notif)
+            }
 
             Log.d("VPN_SERVICE", "VPN Started Successfully (Lightweight DNS Mode)")
         } catch (e: Exception) {
@@ -100,7 +149,7 @@ class LocalDnsVpnService : VpnService() {
         stopVpn()
         
         // Immediately restart the VPN if user tried to revoke it! Force protection!
-        val prefs = getSharedPreferences("VpnPrefs", android.content.Context.MODE_PRIVATE)
+        val prefs = getSafePrefs()
         prefs.edit().putBoolean("vpn_is_running", true).apply()
         startVpn()
         
@@ -128,7 +177,7 @@ class LocalDnsVpnService : VpnService() {
     override fun onDestroy() {
         super.onDestroy()
         stopVpn()
-        val prefs = getSharedPreferences("VpnPrefs", android.content.Context.MODE_PRIVATE)
+        val prefs = getSafePrefs()
         val shouldBeRunning = prefs.getBoolean("vpn_is_running", false)
         if (shouldBeRunning) {
             Log.d("VPN_SERVICE", "VPN destroyed unexpectedly! Restarting to enforce protection.")

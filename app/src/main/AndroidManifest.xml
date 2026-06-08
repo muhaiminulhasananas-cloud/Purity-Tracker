@@ -4,6 +4,12 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
     <application
         android:allowBackup="true"
@@ -25,6 +31,14 @@
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            
+            <!-- Firebase Passwordless Email Link Auth callback -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="ais-pre-spzdpff2lbcs3767oevm2f-22495587935.asia-east1.run.app" />
+            </intent-filter>
         </activity>
         
         <activity android:name=".PinLockActivity"
@@ -35,14 +49,30 @@
             
         <service android:name=".LocalDnsVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
+            android:directBootAware="true"
+            android:foregroundServiceType="specialUse"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="VPN Service Guard to filter adult content locally." />
         </service>
+        
+        <service android:name=".BackgroundNotificationService"
+            android:exported="false" />
+            
+        <receiver android:name=".PrayerAlarmReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="PRAYER_TIME_ACTION"/>
+                <action android:name="PRAYER_REMINDER_ACTION"/>
+            </intent-filter>
+        </receiver>
 
         <service android:name=".ProtectionService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:directBootAware="true"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
@@ -51,7 +81,8 @@
         </service>
         <receiver android:name=".BootReceiver"
             android:exported="true"
-            android:enabled="true">
+            android:enabled="true"
+            android:directBootAware="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />

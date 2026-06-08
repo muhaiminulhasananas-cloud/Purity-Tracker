@@ -9,6 +9,27 @@ import java.util.Calendar
 
 class SalahViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("salah_prefs", Context.MODE_PRIVATE)
+    private val prayerPrefs = application.getSharedPreferences("prayer_prefs", Context.MODE_PRIVATE)
+    
+    private val _todayTimings = MutableStateFlow<Map<String, String>>(emptyMap())
+    val todayTimings = _todayTimings.asStateFlow()
+    
+    private val prefListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
+        if (key?.startsWith("time_") == true) {
+            updateTimingsFromPrefs()
+        }
+    }
+    
+    private fun updateTimingsFromPrefs() {
+        val map = mutableMapOf<String, String>()
+        listOf("Fajr", "Sunrise", "Dhuhr", "Asr", "Sunset", "Maghrib", "Isha").forEach { p ->
+            prayerPrefs.getString("time_$p", null)?.let { time ->
+                map[p] = time
+            }
+        }
+        _todayTimings.value = map
+    }
+
     
     // Store checklist as bitmask (5 bits) for simplicity, for the current day.
     // 0: Fajr, 1: Dhuhr, 2: Asr, 3: Maghrib, 4: Isha
@@ -20,6 +41,13 @@ class SalahViewModel(application: Application) : AndroidViewModel(application) {
     
     init {
         checkAndResetIfNeeded()
+        updateTimingsFromPrefs()
+        prayerPrefs.registerOnSharedPreferenceChangeListener(prefListener)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        prayerPrefs.unregisterOnSharedPreferenceChangeListener(prefListener)
     }
 
     private fun getCurrentDayKey(): String {
