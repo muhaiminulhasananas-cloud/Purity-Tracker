@@ -52,6 +52,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.isActive
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.tween
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -1111,6 +1115,13 @@ fun String.localizeDigits(): String {
     return this.map { if (it in '0'..'9') bnDigits[it - '0'] else it }.joinToString("")
 }
 
+fun formatTimeRange(start: String?, end: String?): String {
+    if (start == null || end == null) return ""
+    val cleanStart = start.replace(Regex("\\s\\(.*\\)"), "")
+    val cleanEnd = end.replace(Regex("\\s\\(.*\\)"), "")
+    return "$cleanStart - $cleanEnd"
+}
+
 data class Badge(
     val id: Int,
     val name: String,
@@ -1321,6 +1332,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        PremiumManager.init(this)
         
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -1353,6 +1365,30 @@ class MainActivity : ComponentActivity() {
         
         enableEdgeToEdge()
         setContent {
+            val authViewModel: AuthViewModel = viewModel()
+            val currentUser by authViewModel.currentUser.collectAsState()
+            val context = androidx.compose.ui.platform.LocalContext.current
+            
+            androidx.compose.runtime.DisposableEffect(currentUser) {
+                var listener: com.google.firebase.firestore.ListenerRegistration? = null
+                if (currentUser != null) {
+                    val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                    listener = db.collection("users").document(currentUser!!.uid)
+                        .addSnapshotListener { snapshot, e ->
+                            if (e == null && snapshot != null && snapshot.exists()) {
+                                val isCloudPremium = snapshot.getBoolean("isPremium") ?: false
+                                val currentLocalPremium = PremiumManager.isPremium.value
+                                if (isCloudPremium != currentLocalPremium) {
+                                    PremiumManager.setPremiumStatus(context, isCloudPremium)
+                                }
+                            }
+                        }
+                }
+                onDispose {
+                    listener?.remove()
+                }
+            }
+
             var currentTab by remember { mutableStateOf("home") }
             var showMeditationDialog by remember { mutableStateOf(false) }
             
@@ -1437,13 +1473,15 @@ fun AppScreen(currentTab: String, onTabSelected: (String) -> Unit) {
     ) { innerPadding ->
         Box(modifier = Modifier.padding(innerPadding)) {
             when (currentTab) {
-                "home" -> HomeScreen()
+                "home" -> HomeScreen(onNavigateToPremium = { onTabSelected("premium") })
                 "history" -> HistoryScreen()
                 "focus" -> FocusScreen()
-                "ai" -> AiScreen()
+                "ai" -> AiScreen(onNavigateToPremium = { onTabSelected("premium") })
                 "community" -> CommunityScreen()
-                "profile" -> ProfileScreen(onNavigateToStaticPage = onTabSelected)
+                "profile" -> ProfileScreen(onNavigateToStaticPage = onTabSelected, onNavigateToPremium = { onTabSelected("premium") })
                 "admin_badges" -> AdminBadgeScreen(onBack = { onTabSelected("profile") })
+                "admin_payments" -> AdminPaymentsScreen(onBack = { onTabSelected("profile") })
+                "premium" -> PremiumPaywallScreen(onClose = { onTabSelected("home") })
             }
         }
     }
@@ -1757,7 +1795,7 @@ fun FocusScreen() {
 }
 
 @Composable
-fun AiScreen() {
+fun AiScreen(onNavigateToPremium: (() -> Unit)? = null) {
     var isIslamicAi by remember { mutableStateOf(true) }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -1787,7 +1825,7 @@ fun AiScreen() {
         }
 
         if (isIslamicAi) {
-            IslamicAiChat()
+            IslamicAiChat(onNavigateToPremium = onNavigateToPremium)
         } else {
             SalahTracker()
         }
@@ -1795,7 +1833,7 @@ fun AiScreen() {
 }
 
 @Composable
-fun IslamicAiChat(aiViewModel: AiViewModel = viewModel()) {
+fun IslamicAiChat(aiViewModel: AiViewModel = viewModel(), onNavigateToPremium: (() -> Unit)? = null) {
     val messages by aiViewModel.messages.collectAsState()
     val isLoading by aiViewModel.isLoading.collectAsState()
     var inputText by remember { mutableStateOf("") }
@@ -1871,10 +1909,55 @@ fun IslamicAiChat(aiViewModel: AiViewModel = viewModel()) {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(messages) { msg ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = if (msg.isUser) Arrangement.End else Arrangement.Start
-                ) {
+                if (msg.text == "limit_reached") {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFD700).copy(alpha = 0.08f)),
+                        border = BorderStroke(1.2.dp, Color(0xFFFFD700).copy(alpha = 0.6f)),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 6.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.WorkspacePremium,
+                                contentDescription = null,
+                                tint = Color(0xFFFFD700),
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                if (LanguageStore.currentLanguage.value == "bn") "দৈনিক ফ্রি এআই কাউন্সেলিং সীমা শেষ! 👑" else "Daily Free AI Limit Reached! 👑",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                if (LanguageStore.currentLanguage.value == "bn") "আপনার দৈনিক ফ্রি এআই মেসেজের সীমা (৩টি) শেষ হয়েছে। পবিত্র চরিত্র গঠন ও আসক্তি নিরাময় সফরকে চিরতরে সফল করতে দয়া করে আমাদের মেম্বারশিপে জয়েন করুন।" else "Your daily free AI message limit (3/3) has been reached. Please join Warrior Pro layout to enjoy unlimited counseling alerts & VIP services.",
+                                color = Color.LightGray,
+                                fontSize = 12.sp,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Button(
+                                onClick = { onNavigateToPremium?.invoke() },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFD700)),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(if (LanguageStore.currentLanguage.value == "bn") "যোদ্ধা প্রো-তে যোগ দিন ৳১৪৯" else "Upgrade to Warrior Pro for BDT 149", color = Color.Black, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = if (msg.isUser) Arrangement.End else Arrangement.Start
+                    ) {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = if (msg.isUser) CyanAccent.copy(alpha=0.2f) else CardBlue),
                         shape = if (msg.isUser) RoundedCornerShape(16.dp, 16.dp, 0.dp, 16.dp) else RoundedCornerShape(16.dp, 16.dp, 16.dp, 0.dp),
@@ -1966,6 +2049,7 @@ fun IslamicAiChat(aiViewModel: AiViewModel = viewModel()) {
                     }
                 }
             }
+        }
             if (isLoading) {
                 item {
                     Text(t("ai_thinking"), color = Color.Gray, modifier = Modifier.padding(16.dp))
@@ -2006,18 +2090,210 @@ fun IslamicAiChat(aiViewModel: AiViewModel = viewModel()) {
     }
 }
 
-fun formatTime(time24: String?): String {
-    if (time24 == null) return ""
-    try {
-        val sdf24 = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
-        val sdf12 = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.getDefault())
-        return sdf12.format(sdf24.parse(time24.replace(Regex("\\s\\(.*\\)"), ""))!!)
-    } catch(e: Exception) { return time24 }
+@Composable
+fun SalahItem(title: String, desc: String, timeRange: String, checked: Boolean, onClick: () -> Unit) {
+     Card(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).clickable { onClick() }, colors = CardDefaults.cardColors(containerColor = CardBlue)) {
+          Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+               Box(modifier = Modifier.size(24.dp).background(DeepBlue, CircleShape)) {
+                   if (checked) {
+                       Icon(Icons.Filled.Check, contentDescription = null, tint = GreenText, modifier = Modifier.size(16.dp).align(Alignment.Center))
+                   }
+               }
+               Spacer(modifier = Modifier.width(16.dp))
+               Column(modifier = Modifier.weight(1f)) {
+                   Text(title, color = Color.White, fontWeight = FontWeight.Bold)
+                   if (timeRange.isNotEmpty()) {
+                       Text(timeRange, color = CyanAccent, fontSize = 12.sp)
+                   }
+                   Text(desc, color = Color.LightGray, fontSize = 12.sp)
+               }
+               Box(modifier = Modifier.size(24.dp).background(if(checked) GreenText.copy(alpha=0.3f) else Color.Transparent, RoundedCornerShape(4.dp)).border(2.dp, if(checked) GreenText else Color.Gray, RoundedCornerShape(4.dp))) {
+                   if (checked) {
+                       Icon(Icons.Filled.Check, contentDescription = null, tint = GreenText, modifier = Modifier.align(Alignment.Center))
+                   }
+               }
+          }
+     }
 }
 
-fun formatTimeRange(start: String?, end: String?): String {
-    if (start == null || end == null) return ""
-    return "${formatTime(start)} - ${formatTime(end)}"
+@Composable
+fun CommunityScreen(communityViewModel: CommunityViewModel = viewModel(), authViewModel: AuthViewModel = viewModel()) {
+    val posts by communityViewModel.posts.collectAsState()
+    val leaders by communityViewModel.leaders.collectAsState()
+    val currentUser by authViewModel.currentUser.collectAsState()
+    var postText by remember { mutableStateOf("") }
+    
+    var activeTab by remember { mutableStateOf("feed") } // "feed" or "challenges"
+    var activeChatChallenge by remember { mutableStateOf<Challenge?>(null) }
+
+    if (activeChatChallenge != null) {
+        ChallengeChatRoom(
+            challenge = activeChatChallenge!!,
+            communityViewModel = communityViewModel,
+            currentUserEmail = currentUser?.email ?: "",
+            onBack = { activeChatChallenge = null }
+        )
+    } else {
+        Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(CardBlue)
+                    .padding(4.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (activeTab == "feed") CyanAccent else Color.Transparent)
+                        .clickable { activeTab = "feed" }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.Public,
+                            contentDescription = null,
+                            tint = if (activeTab == "feed") DeepBlue else Color.LightGray,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = t("tab_global"),
+                            color = if (activeTab == "feed") DeepBlue else Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (activeTab == "challenges") CyanAccent else Color.Transparent)
+                        .clickable { activeTab = "challenges" }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.People,
+                            contentDescription = null,
+                            tint = if (activeTab == "challenges") DeepBlue else Color.LightGray,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = t("tab_challenges"),
+                            color = if (activeTab == "challenges") DeepBlue else Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            if (activeTab == "feed") {
+                Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.EmojiEvents, contentDescription = null, tint = Color(0xFFFFD700))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(t("leaderboard_title") ?: "Global Leaderboard", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    if (leaders.isEmpty()) {
+                        Text("No warriors found on leaderboard yet...", color = Color.LightGray)
+                    } else {
+                        leaders.forEachIndexed { index, leader ->
+                            val days = java.util.concurrent.TimeUnit.MILLISECONDS.toDays(leader.streakMs).toInt()
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("${index + 1}.", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.width(28.dp))
+                                Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                                    Text(leader.name, color = Color.White)
+                                    val isMe = leader.id == (currentUser?.uid ?: "")
+                                    val isPremiumUserState by PremiumManager.isPremium.collectAsState()
+                                    if (isMe && isPremiumUserState) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Icon(
+                                            imageVector = Icons.Filled.Star,
+                                            contentDescription = "Pro",
+                                            tint = Color(0xFFFFD700),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                                
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("${days} days streak", color = Color.White, fontSize = 12.sp, modifier = Modifier.width(100.dp), textAlign = TextAlign.End)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text("Post your progress", color = Color.White, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = CardBlue)) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            OutlinedTextField(
+                                value = postText,
+                                onValueChange = { postText = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                placeholder = { Text("Write something inspiring to fuel other warriors...", color = Color.LightGray, fontSize = 14.sp) },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    unfocusedBorderColor = Color.Gray,
+                                    focusedBorderColor = CyanAccent,
+                                    unfocusedTextColor = Color.White,
+                                    focusedTextColor = Color.White
+                                )
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Button(
+                                onClick = { 
+                                    if (postText.isNotBlank()) {
+                                        communityViewModel.addPost(postText, "Active Streak: Unknown", "Novice")
+                                        postText = ""
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                  Text("Publish Status", color = Color.White)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text("Latest Motivational Board", color = Color.White, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    if (posts.isEmpty()) {
+                        Text("Loading posts or no posts yet...", color = Color.LightGray)
+                    } else {
+                        posts.forEach { post ->
+                            CommunityPost(
+                                post = post,
+                                currentUserId = currentUser?.uid ?: "",
+                                communityViewModel = communityViewModel
+                            )
+                        }
+                    }
+                }
+            } else {
+                ChallengesTabContent(
+                    communityViewModel = communityViewModel,
+                    currentUserEmail = currentUser?.email ?: "",
+                    onOpenChat = { challenge ->
+                        activeChatChallenge = challenge
+                    }
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -2035,7 +2311,6 @@ fun PrayerCountdownTimer(timings: Map<String, String>) {
             val now = java.util.Calendar.getInstance()
             val nowStr = String.format(java.util.Locale.US, "%02d:%02d", now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE))
             
-            // Check forbidden times
             fun getMins(timeStr: String?): Int {
                 if (timeStr == null) return -1
                 val p = timeStr.replace(Regex("\\s\\(.*\\)"), "").split(":")
@@ -2055,7 +2330,6 @@ fun PrayerCountdownTimer(timings: Map<String, String>) {
                 forbiddenTimeKey = "forbidden_sunset"
             }
 
-            // simple ordered list
             val order = listOf("Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha")
             var foundNext = false
             for (i in order.indices) {
@@ -2081,7 +2355,6 @@ fun PrayerCountdownTimer(timings: Map<String, String>) {
                 }
             }
             if (!foundNext) {
-                // Next is tomorrow's Fajr
                 val t = timings["Fajr"]?.replace(Regex("\\s\\(.*\\)"), "")
                 if (t != null) {
                     val pCal = java.util.Calendar.getInstance()
@@ -2158,7 +2431,6 @@ fun PrayerCountdownTimer(timings: Map<String, String>) {
                         )
                     )
             ) {
-                // Background Illustration
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val w = size.width
                     val h = size.height
@@ -2253,7 +2525,6 @@ fun PrayerCountdownTimer(timings: Map<String, String>) {
                 Column(
                     modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 24.dp)
                 ) {
-                    // Top area
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -2284,7 +2555,6 @@ fun PrayerCountdownTimer(timings: Map<String, String>) {
                     
                     Spacer(modifier = Modifier.weight(1f))
                     
-                    // Bottom area
                     Column(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalAlignment = Alignment.CenterHorizontally
@@ -2296,7 +2566,6 @@ fun PrayerCountdownTimer(timings: Map<String, String>) {
                     
                     Spacer(modifier = Modifier.height(24.dp))
                     
-                    // Bottom links
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -2404,7 +2673,7 @@ fun SalahTracker(viewModel: SalahViewModel = viewModel()) {
         val dhuhrRange = formatTimeRange(todayTimings["Dhuhr"], todayTimings["Asr"])
         val asrRange = formatTimeRange(todayTimings["Asr"], todayTimings["Maghrib"])
         val maghribRange = formatTimeRange(todayTimings["Maghrib"], todayTimings["Isha"])
-        val ishaRange = formatTimeRange(todayTimings["Isha"], todayTimings["Fajr"]) // technically next day's mid/fajr.
+        val ishaRange = formatTimeRange(todayTimings["Isha"], todayTimings["Fajr"])
 
         SalahItem(t("fajr"), t("fajr_desc"), fajrRange, todaySalahs[0]) { viewModel.toggleSalah(0) }
         SalahItem(t("dhuhr"), t("dhuhr_desc"), dhuhrRange, todaySalahs[1]) { viewModel.toggleSalah(1) }
@@ -2414,195 +2683,541 @@ fun SalahTracker(viewModel: SalahViewModel = viewModel()) {
     }
 }
 
-@Composable
-fun SalahItem(title: String, desc: String, timeRange: String, checked: Boolean, onClick: () -> Unit) {
-     Card(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).clickable { onClick() }, colors = CardDefaults.cardColors(containerColor = CardBlue)) {
-          Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-               Box(modifier = Modifier.size(24.dp).background(DeepBlue, CircleShape)) {
-                   if (checked) {
-                       Icon(Icons.Filled.Check, contentDescription = null, tint = GreenText, modifier = Modifier.size(16.dp).align(Alignment.Center))
-                   }
-               }
-               Spacer(modifier = Modifier.width(16.dp))
-               Column(modifier = Modifier.weight(1f)) {
-                   Text(title, color = Color.White, fontWeight = FontWeight.Bold)
-                   if (timeRange.isNotEmpty()) {
-                       Text(timeRange, color = CyanAccent, fontSize = 12.sp)
-                   }
-                   Text(desc, color = Color.LightGray, fontSize = 12.sp)
-               }
-               Box(modifier = Modifier.size(24.dp).background(if(checked) GreenText.copy(alpha=0.3f) else Color.Transparent, RoundedCornerShape(4.dp)).border(2.dp, if(checked) GreenText else Color.Gray, RoundedCornerShape(4.dp))) {
-                   if (checked) {
-                       Icon(Icons.Filled.Check, contentDescription = null, tint = GreenText, modifier = Modifier.align(Alignment.Center))
-                   }
-               }
-          }
-     }
+class VoicePlayerManager(private val context: android.content.Context) {
+    private var mediaPlayer: android.media.MediaPlayer? = null
+    val currentlyPlayingMessageId = mutableStateOf<String?>(null)
+    val currentPlaybackPosition = mutableStateOf(0f)
+    val isPlaying = mutableStateOf(false)
+    private var progressJob: kotlinx.coroutines.Job? = null
+    private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
+
+    fun play(msgId: String, base64Audio: String, onFinished: () -> Unit) {
+        if (currentlyPlayingMessageId.value == msgId) {
+            if (mediaPlayer?.isPlaying == true) {
+                mediaPlayer?.pause()
+                isPlaying.value = false
+                return
+            } else {
+                mediaPlayer?.start()
+                isPlaying.value = true
+                startProgressTracker()
+                return
+            }
+        }
+        
+        stop()
+
+        val filePath = base64ToFile(context, base64Audio, msgId)
+        if (filePath.isEmpty()) return
+
+        try {
+            mediaPlayer = android.media.MediaPlayer().apply {
+                setDataSource(filePath)
+                prepare()
+                start()
+                this@VoicePlayerManager.currentlyPlayingMessageId.value = msgId
+                this@VoicePlayerManager.isPlaying.value = true
+                
+                setOnCompletionListener {
+                    stop()
+                    onFinished()
+                }
+            }
+            startProgressTracker()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun startProgressTracker() {
+        progressJob?.cancel()
+        progressJob = scope.launch {
+            while (isPlaying.value && mediaPlayer != null) {
+                try {
+                    val duration = mediaPlayer?.duration ?: 1
+                    val current = mediaPlayer?.currentPosition ?: 0
+                    currentPlaybackPosition.value = current.toFloat() / duration.toFloat()
+                } catch (e: Exception) {}
+                kotlinx.coroutines.delay(100)
+            }
+        }
+    }
+
+    fun stop() {
+        progressJob?.cancel()
+        try {
+            if (mediaPlayer?.isPlaying == true) {
+                mediaPlayer?.stop()
+            }
+            mediaPlayer?.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            mediaPlayer = null
+            currentlyPlayingMessageId.value = null
+            currentPlaybackPosition.value = 0f
+            isPlaying.value = false
+        }
+    }
+}
+
+fun fileToBase64(filePath: String): String {
+    val file = java.io.File(filePath)
+    if (!file.exists()) return ""
+    return try {
+        val bytes = file.readBytes()
+        android.util.Base64.encodeToString(bytes, android.util.Base64.DEFAULT)
+    } catch (e: Exception) {
+        ""
+    }
+}
+
+fun base64ToFile(context: android.content.Context, base64Str: String, msgId: String): String {
+    val file = java.io.File(context.cacheDir, "voice_msg_$msgId.3gp")
+    if (file.exists()) return file.absolutePath
+    return try {
+        val bytes = android.util.Base64.decode(base64Str, android.util.Base64.DEFAULT)
+        file.writeBytes(bytes)
+        file.absolutePath
+    } catch (e: Exception) {
+        ""
+    }
 }
 
 @Composable
-fun CommunityScreen(communityViewModel: CommunityViewModel = viewModel(), authViewModel: AuthViewModel = viewModel()) {
-    val posts by communityViewModel.posts.collectAsState()
-    val leaders by communityViewModel.leaders.collectAsState()
-    val currentUser by authViewModel.currentUser.collectAsState()
-    var postText by remember { mutableStateOf("") }
+fun VoiceMessagePlayerItem(
+    msg: ChallengeMessage,
+    voicePlayerManager: VoicePlayerManager,
+    isMe: Boolean
+) {
+    val isCurrent = voicePlayerManager.currentlyPlayingMessageId.value == msg.id
+    val isPlaying = isCurrent && voicePlayerManager.isPlaying.value
+    val progress = if (isCurrent) voicePlayerManager.currentPlaybackPosition.value else 0f
     
-    var activeTab by remember { mutableStateOf("feed") } // "feed" or "challenges"
-    var activeChatChallenge by remember { mutableStateOf<Challenge?>(null) }
-
-    if (activeChatChallenge != null) {
-        ChallengeChatRoom(
-            challenge = activeChatChallenge!!,
-            communityViewModel = communityViewModel,
-            currentUserEmail = currentUser?.email ?: "",
-            onBack = { activeChatChallenge = null }
-        )
-    } else {
-        Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-            // Tab switcher Row
-            Row(
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .widthIn(min = 180.dp, max = 260.dp)
+            .padding(vertical = 4.dp)
+    ) {
+        IconButton(
+            onClick = {
+                voicePlayerManager.play(msg.id, msg.voiceUrl) {}
+            },
+            modifier = Modifier
+                .size(36.dp)
+                .background(if (isMe) Color.White.copy(alpha = 0.2f) else CyanAccent.copy(alpha = 0.15f), CircleShape)
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                contentDescription = if (isPlaying) "Pause" else "Play",
+                tint = if (isMe) Color.White else CyanAccent,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+        
+        Spacer(modifier = Modifier.width(8.dp))
+        
+        Column(modifier = Modifier.weight(1f)) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(CardBlue)
-                    .padding(4.dp)
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(if (isMe) Color.White.copy(alpha = 0.3f) else Color.Gray.copy(alpha = 0.4f))
             ) {
                 Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (activeTab == "feed") CyanAccent else Color.Transparent)
-                        .clickable { activeTab = "feed" }
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Filled.Public,
-                            contentDescription = null,
-                            tint = if (activeTab == "feed") DeepBlue else Color.LightGray,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = t("tab_global"),
-                            color = if (activeTab == "feed") DeepBlue else Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
-                        )
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (activeTab == "challenges") CyanAccent else Color.Transparent)
-                        .clickable { activeTab = "challenges" }
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Filled.People,
-                            contentDescription = null,
-                            tint = if (activeTab == "challenges") DeepBlue else Color.LightGray,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = t("tab_challenges"),
-                            color = if (activeTab == "challenges") DeepBlue else Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
-                        )
-                    }
-                }
+                        .fillMaxHeight()
+                        .fillMaxWidth(fraction = progress.coerceIn(0f, 1f))
+                        .background(if (isMe) Color.White else CyanAccent)
+                )
             }
+            
+            Spacer(modifier = Modifier.height(4.dp))
+            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "ভয়েস বার্তা", 
+                    color = if (isMe) Color.White.copy(alpha = 0.8f) else Color.LightGray, 
+                    fontSize = 11.sp
+                )
+                
+                val durationStr = if (msg.voiceDurationSec > 0) {
+                    val minutes = msg.voiceDurationSec / 60
+                    val seconds = msg.voiceDurationSec % 60
+                    String.format("%02d:%02d", minutes, seconds).localizeDigits()
+                } else {
+                    "00:05".localizeDigits()
+                }
+                Text(
+                    text = durationStr, 
+                    color = if (isMe) Color.White.copy(alpha = 0.8f) else Color.LightGray, 
+                    fontSize = 11.sp
+                )
+            }
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.height(16.dp))
+@Composable
+fun ChallengeChatRoom(
+    challenge: Challenge,
+    communityViewModel: CommunityViewModel,
+    currentUserEmail: String,
+    onBack: () -> Unit
+) {
+    val messagesMap by communityViewModel.challengeMessages.collectAsState()
+    val messages = messagesMap[challenge.id] ?: emptyList()
+    var inputMsg by remember { mutableStateOf("") }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val context = LocalContext.current
+    val voicePlayerManager = remember { VoicePlayerManager(context) }
 
-            if (activeTab == "feed") {
-                Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Outlined.EmojiEvents, contentDescription = null, tint = Color(0xFFFFD700))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Global Leaderboard (Top Days)", color = Color.White, fontWeight = FontWeight.Bold)
-                    }
-                    Spacer(modifier = Modifier.height(16.dp))
-                    
-                    if (leaders.isEmpty()) {
-                        Text("No warriors found on leaderboard yet...", color = Color.LightGray)
-                    } else {
-                        leaders.forEachIndexed { index, leader ->
-                            val days = TimeUnit.MILLISECONDS.toDays(leader.streakMs).toInt()
-                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text("${index + 1}.", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.width(28.dp))
-                                Text(leader.name, color = Color.White, modifier = Modifier.weight(1f))
-                                
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("${days} days streak", color = Color.White, fontSize = 12.sp, modifier = Modifier.width(100.dp), textAlign = TextAlign.End)
-                            }
-                        }
-                    }
+    var isRecording by remember { mutableStateOf(false) }
+    var recordingDurationSec by remember { mutableStateOf(0) }
+    var mediaRecorder by remember { mutableStateOf<android.media.MediaRecorder?>(null) }
+    val recordFilePath = remember { java.io.File(context.cacheDir, "temp_voice_record.3gp").absolutePath }
 
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text("Post your progress", color = Color.White, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = CardBlue)) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            OutlinedTextField(
-                                value = postText,
-                                onValueChange = { postText = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                placeholder = { Text("Write something inspiring to fuel other warriors...", color = Color.LightGray, fontSize = 14.sp) },
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    unfocusedBorderColor = Color.Gray,
-                                    focusedBorderColor = CyanAccent,
-                                    unfocusedTextColor = Color.White,
-                                    focusedTextColor = Color.White
-                                )
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Button(
-                                onClick = { 
-                                    if (postText.isNotBlank()) {
-                                        communityViewModel.addPost(postText, "Active Streak: Unknown", "Novice")
-                                        postText = ""
-                                    }
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                  Text("Publish Status", color = Color.White)
-                            }
-                        }
-                    }
+    LaunchedEffect(isRecording) {
+        if (isRecording) {
+            recordingDurationSec = 0
+            while (isRecording) {
+                delay(1000)
+                recordingDurationSec += 1
+            }
+        }
+    }
 
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text("Latest Motivational Board", color = Color.White, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(16.dp))
-                    
-                    if (posts.isEmpty()) {
-                        Text("Loading posts or no posts yet...", color = Color.LightGray)
-                    } else {
-                        posts.forEach { post ->
-                            CommunityPost(
-                                post = post,
-                                currentUserId = currentUser?.uid ?: "",
-                                communityViewModel = communityViewModel
-                            )
-                        }
+    DisposableEffect(Unit) {
+        onDispose {
+            voicePlayerManager.stop()
+            try {
+                mediaRecorder?.apply {
+                    stop()
+                    release()
+                }
+            } catch (e: Exception) {}
+        }
+    }
+
+    val startRecordingLambda = {
+        try {
+            val file = java.io.File(recordFilePath)
+            if (file.exists()) file.delete()
+            
+            val recorder = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                android.media.MediaRecorder(context)
+            } else {
+                @Suppress("DEPRECATION")
+                android.media.MediaRecorder()
+            }.apply {
+                setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
+                setOutputFormat(android.media.MediaRecorder.OutputFormat.THREE_GPP)
+                setAudioEncoder(android.media.MediaRecorder.AudioEncoder.AMR_NB)
+                setOutputFile(recordFilePath)
+                prepare()
+                start()
+            }
+            mediaRecorder = recorder
+            isRecording = true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            android.widget.Toast.makeText(context, "রেকর্ডিং শুরু করা যায়নি!", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val stopAndSendRecordingLambda = {
+        try {
+            mediaRecorder?.apply {
+                stop()
+                release()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+             mediaRecorder = null
+             isRecording = false
+        }
+        
+        val base64 = fileToBase64(recordFilePath)
+        if (base64.isNotEmpty() && recordingDurationSec > 0) {
+            val banglaVoiceText = "ভয়েস মেসেজ (স্পিকার টিপুন) 🎙️"
+            communityViewModel.sendChallengeMessage(
+                challengeId = challenge.id,
+                text = banglaVoiceText,
+                voiceUrl = base64,
+                voiceDurationSec = recordingDurationSec
+            )
+        }
+    }
+
+    val cancelRecordingLambda = {
+        try {
+            mediaRecorder?.apply {
+                stop()
+                release()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+             mediaRecorder = null
+             isRecording = false
+        }
+        try {
+            val file = java.io.File(recordFilePath)
+            if (file.exists()) file.delete()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+        onResult = { isGranted ->
+            if (isGranted) {
+                startRecordingLambda()
+            } else {
+                android.widget.Toast.makeText(context, "ভয়েস রেকর্ডের জন্য অনুগ্রহ করে অনুমতি প্রদান করুন", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    )
+
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
+
+    LaunchedEffect(challenge.id) {
+        communityViewModel.fetchChallengeMessages(challenge.id)
+    }
+
+    Column(modifier = Modifier.fillMaxSize().background(DeepBlue)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(CardBlue)
+                .padding(horizontal = 8.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(challenge.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${challenge.durationDays} Days • ${challenge.participantCount} Participants", color = CyanAccent, fontSize = 12.sp)
+            }
+        }
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            if (messages.isEmpty()) {
+                item {
+                    Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "শুরুতেই একটি অনুপ্রেরণাদায়ক বার্তা পাঠিয়ে গ্রুপে প্রথম ব্যক্তি হোন! ✨",
+                            color = Color.LightGray,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(16.dp)
+                        )
                     }
                 }
             } else {
-                ChallengesTabContent(
-                    communityViewModel = communityViewModel,
-                    currentUserEmail = currentUser?.email ?: "",
-                    onOpenChat = { challenge ->
-                        activeChatChallenge = challenge
+                items(messages) { msg ->
+                    val isMe = msg.senderEmail == currentUserEmail
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start
+                    ) {
+                        Column(
+                            horizontalAlignment = if (isMe) Alignment.End else Alignment.Start
+                        ) {
+                            if (!isMe) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(msg.senderName, color = CyanAccent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    if (msg.senderEmail == "muhaiminulhasananas@gmail.com") {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Icon(Icons.Filled.Verified, contentDescription = "Admin", tint = CyanAccent, modifier = Modifier.size(12.dp))
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(
+                                        RoundedCornerShape(
+                                            topStart = 12.dp,
+                                            topEnd = 12.dp,
+                                            bottomStart = if (isMe) 12.dp else 0.dp,
+                                            bottomEnd = if (isMe) 0.dp else 12.dp
+                                        )
+                                    )
+                                    .background(if (isMe) Color(0xFFEF4444) else CardBlue)
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                            ) {
+                                if (msg.voiceUrl.isNotEmpty()) {
+                                    VoiceMessagePlayerItem(
+                                        msg = msg,
+                                        voicePlayerManager = voicePlayerManager,
+                                        isMe = isMe
+                                    )
+                                } else {
+                                    Text(msg.message, color = Color.White, fontSize = 14.sp)
+                                }
+                            }
+                        }
                     }
+                }
+            }
+        }
+
+        if (isRecording) {
+            val infiniteTransition = rememberInfiniteTransition()
+            val alpha by infiniteTransition.animateFloat(
+                initialValue = 0.3f,
+                targetValue = 1.0f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 800),
+                    repeatMode = RepeatMode.Reverse
                 )
+            )
+            
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(CardBlue)
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(
+                    onClick = { cancelRecordingLambda() },
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(Color.Red.copy(alpha = 0.15f), CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Delete,
+                        contentDescription = "Cancel Recording",
+                        tint = Color(0xFFEF4444),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(12.dp)
+                            .clip(CircleShape)
+                            .background(Color.Red.copy(alpha = alpha))
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    val minSecStr = String.format("%02d:%02d", recordingDurationSec / 60, recordingDurationSec % 60).localizeDigits()
+                    Text(
+                        text = "ভয়েস রেকর্ড হচ্ছে... $minSecStr",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                
+                IconButton(
+                    onClick = { stopAndSendRecordingLambda() },
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(Color(0xFF22C55E).copy(alpha = 0.2f), CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = "Stop & Send Voice",
+                        tint = Color(0xFF22C55E),
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(CardBlue)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = inputMsg,
+                    onValueChange = { inputMsg = it },
+                    placeholder = { Text("গ্রুপে আপনার বার্তা লিখুন...", color = Color.Gray, fontSize = 13.sp) },
+                    modifier = Modifier.weight(1f),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        unfocusedBorderColor = Color.DarkGray,
+                        focusedBorderColor = CyanAccent,
+                        unfocusedTextColor = Color.White,
+                        focusedTextColor = Color.White
+                    ),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                
+                IconButton(
+                    onClick = {
+                        val hasLockPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+                            context,
+                            android.Manifest.permission.RECORD_AUDIO
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+                        if (hasLockPermission) {
+                            startRecordingLambda()
+                        } else {
+                            permissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                        }
+                    },
+                    modifier = Modifier
+                        .background(if (inputMsg.isEmpty()) CyanAccent else Color.DarkGray, CircleShape)
+                        .size(44.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Mic,
+                        contentDescription = "Record Voice",
+                        tint = if (inputMsg.isEmpty()) DeepBlue else Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                
+                if (inputMsg.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    IconButton(
+                        onClick = {
+                            if (inputMsg.isNotBlank()) {
+                                 communityViewModel.sendChallengeMessage(challenge.id, inputMsg)
+                                 inputMsg = ""
+                            }
+                        },
+                        modifier = Modifier
+                            .background(CyanAccent, CircleShape)
+                            .size(44.dp)
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = DeepBlue, modifier = Modifier.size(20.dp))
+                    }
+                }
             }
         }
     }
@@ -2827,7 +3442,7 @@ fun ChallengeCard(
 }
 
 @Composable
-fun ChallengeChatRoom(
+fun ChallengeChatRoomOld(
     challenge: Challenge,
     communityViewModel: CommunityViewModel,
     currentUserEmail: String,
@@ -3094,10 +3709,12 @@ fun ProfileScreen(
     authViewModel: AuthViewModel = viewModel(),
     purityTrackerViewModel: PurityTrackerViewModel = viewModel(),
     communityViewModel: CommunityViewModel = viewModel(),
-    onNavigateToStaticPage: (String) -> Unit = {}
+    onNavigateToStaticPage: (String) -> Unit = {},
+    onNavigateToPremium: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val currentUser by authViewModel.currentUser.collectAsState()
+    val isPremiumUserState by PremiumManager.isPremium.collectAsState()
     val activity = context as? androidx.activity.ComponentActivity
 
     // Handle deep link authentication intent callbacks at screen launch or session changes safely!
@@ -3569,6 +4186,12 @@ fun ProfileScreen(
                                Icon(Icons.Filled.AdminPanelSettings, contentDescription = null)
                                Spacer(modifier = Modifier.width(8.dp))
                                Text("Admin: Manage Badges")
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(onClick = { onNavigateToStaticPage("admin_payments") }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFD700)), modifier = Modifier.fillMaxWidth()) {
+                                Icon(Icons.Filled.Payment, contentDescription = null, tint = Color.Black)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Admin: Payment Approvals (৳)", color = Color.Black, fontWeight = FontWeight.Bold)
                            }
                        }
                   }
@@ -3610,7 +4233,37 @@ fun ProfileScreen(
                  Spacer(modifier = Modifier.height(12.dp))
                  OutlinedTextField(value = guardianEmail, onValueChange = { guardianEmail = it; sharedPref.edit().putString("guardianEmail", it).apply() }, label = { Text(t("guardian_email")) }, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = Color.Gray, focusedBorderColor = CyanAccent, unfocusedTextColor = Color.White, focusedTextColor = Color.White, unfocusedLabelColor = Color.Gray, focusedLabelColor = CyanAccent))
                  Spacer(modifier = Modifier.height(12.dp))
-                 OutlinedTextField(value = guardianPhone, onValueChange = { guardianPhone = it; sharedPref.edit().putString("guardianPhone", it).apply() }, label = { Text(t("phone_optional")) }, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = Color.Gray, focusedBorderColor = CyanAccent, unfocusedTextColor = Color.White, focusedTextColor = Color.White, unfocusedLabelColor = Color.Gray, focusedLabelColor = CyanAccent))
+                 OutlinedTextField(value = if (isPremiumUserState) guardianPhone else "",
+                      onValueChange = { 
+                          if (isPremiumUserState) {
+                              guardianPhone = it
+                              sharedPref.edit().putString("guardianPhone", it).apply()
+                          } else {
+                              onNavigateToPremium?.invoke()
+                          }
+                      }, 
+                      readOnly = !isPremiumUserState,
+                      label = { Text(if (isPremiumUserState) t("phone_optional") else "Guardian Phone (Pro Exclusive 👑)") }, 
+                      modifier = Modifier.fillMaxWidth().clickable {
+                          if (!isPremiumUserState) {
+                              onNavigateToPremium?.invoke()
+                          }
+                      },
+                      trailingIcon = {
+                          if (!isPremiumUserState) {
+                              IconButton(onClick = { onNavigateToPremium?.invoke() }) {
+                                  Icon(Icons.Filled.Lock, contentDescription = "Locked", tint = Color(0xFFFFD700))
+                              }
+                          }
+                      },
+                      colors = OutlinedTextFieldDefaults.colors(
+                          unfocusedBorderColor = if (isPremiumUserState) Color.Gray else Color(0xFFFFD700).copy(alpha = 0.5f), 
+                          focusedBorderColor = if (isPremiumUserState) CyanAccent else Color(0xFFFFD700), 
+                          unfocusedTextColor = Color.White, 
+                          focusedTextColor = Color.White, 
+                          unfocusedLabelColor = if (isPremiumUserState) Color.Gray else Color(0xFFFFD700).copy(alpha = 0.8f), 
+                          focusedLabelColor = if (isPremiumUserState) CyanAccent else Color(0xFFFFD700)
+                      ))
                  Spacer(modifier = Modifier.height(16.dp))
 
                  Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
@@ -3711,7 +4364,8 @@ fun changeAppLocale(context: Context, localeTag: String) {
 fun HomeScreen(
     viewModel: PurityTrackerViewModel = viewModel(),
     badgesViewModel: BadgesViewModel = viewModel(),
-    communityViewModel: CommunityViewModel = viewModel()
+    communityViewModel: CommunityViewModel = viewModel(),
+    onNavigateToPremium: (() -> Unit)? = null
 ) {
     val durationMs by viewModel.durationMs.collectAsState()
     val dynamicBadges by badgesViewModel.badges.collectAsState()
@@ -3770,6 +4424,7 @@ fun HomeScreen(
     }
 
     val scrollState = rememberScrollState()
+    val isPremiumUser by PremiumManager.isPremium.collectAsState()
 
     Column(
         modifier = Modifier
@@ -3804,6 +4459,90 @@ fun HomeScreen(
                     t("alert_warning_desc"),
                     fontSize = 12.sp, color = Color.White
                 )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Premium PRO Promo / Status Banner
+        if (!isPremiumUser) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFD700).copy(alpha = 0.05f)),
+                border = BorderStroke(1.5.dp, androidx.compose.ui.graphics.Brush.horizontalGradient(
+                    colors = listOf(Color(0xFFFFD700), CyanAccent)
+                )),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onNavigateToPremium?.invoke() }
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .background(Color(0xFFFFD700).copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape)
+                            .size(40.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Star,
+                            contentDescription = null,
+                            tint = Color(0xFFFFD700),
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (LanguageStore.currentLanguage.value == "bn") "যোদ্ধা প্রো-তে আপগ্রেড করুন 👑" else "Upgrade to Warrior Pro 👑",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = if (LanguageStore.currentLanguage.value == "bn") "আনলিমিটেড এআই কোচ, অভিভাবক এসএমএস এলার্ট এবং স্পেশাল প্রো ব্যাজ!" else "Unlimited AI Coach, guardian SMS alerts & premium features!",
+                            color = Color.LightGray,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        imageVector = Icons.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = Color(0xFFFFD700),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        } else {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF10B981).copy(alpha = 0.08f)),
+                border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.3f)),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Star,
+                        contentDescription = null,
+                        tint = Color(0xFFFFD700),
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (LanguageStore.currentLanguage.value == "bn") "যোদ্ধা প্রো মেম্বারশিপ সক্রিয় রয়েছে 👑" else "Warrior Pro Membership: Active 👑",
+                        color = Color(0xFFFFD700),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
             }
         }
 

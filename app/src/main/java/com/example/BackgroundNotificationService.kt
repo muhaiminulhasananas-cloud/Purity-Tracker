@@ -24,6 +24,7 @@ class BackgroundNotificationService : Service() {
     private val auth = FirebaseAuth.getInstance()
     private val listeners = mutableListOf<ListenerRegistration>()
     private var isJoinedChallengesListenerActive : ListenerRegistration? = null
+    private var paymentRequestListener: ListenerRegistration? = null
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + job)
     
@@ -38,6 +39,10 @@ class BackgroundNotificationService : Service() {
         
         setupNotificationChannels()
         startListeningToChallenges()
+        
+        if (auth.currentUser?.email == "muhaiminulhasananas@gmail.com") {
+            startListeningToPayments()
+        }
 
         return START_STICKY
     }
@@ -61,6 +66,14 @@ class BackgroundNotificationService : Service() {
             )
             prayerChannel.description = "Prayer time alerts"
             nm.createNotificationChannel(prayerChannel)
+
+            val paymentChannel = NotificationChannel(
+                "payment_notifications",
+                "Payment Approvals",
+                NotificationManager.IMPORTANCE_HIGH
+            )
+            paymentChannel.description = "Payment request alerts for Admins"
+            nm.createNotificationChannel(paymentChannel)
         }
     }
 
@@ -144,8 +157,52 @@ class BackgroundNotificationService : Service() {
         nm.notify("chat", challengeId.hashCode(), notif)
     }
 
+    private fun startListeningToPayments() {
+        val startTime = System.currentTimeMillis()
+        paymentRequestListener?.remove()
+        paymentRequestListener = db.collection("payment_requests")
+            .whereEqualTo("status", "pending")
+            .addSnapshotListener { snapshot, e ->
+                if (e != null || snapshot == null) return@addSnapshotListener
+                for (change in snapshot.documentChanges) {
+                    if (change.type == com.google.firebase.firestore.DocumentChange.Type.ADDED) {
+                        val timestamp = change.document.getLong("timestamp") ?: 0L
+                        if (timestamp > startTime) {
+                            val userName = change.document.getString("userName") ?: "ব্যবহারকারী"
+                            val amount = change.document.getString("amount") ?: ""
+                            val method = change.document.getString("method") ?: "বিকাশ/নগদ"
+                            showPaymentNotification(userName, amount, method)
+                        }
+                    }
+                }
+            }
+    }
+
+    private fun showPaymentNotification(userName: String, amount: String, method: String) {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            putExtra("open_tab", "profile")
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, 99912, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notif = NotificationCompat.Builder(this, "payment_notifications")
+            .setSmallIcon(android.R.drawable.ic_menu_agenda)
+            .setContentTitle("নতুন পেমেন্ট রিকোয়েস্ট! ৳")
+            .setContentText("$userName $amount পাঠিয়েছেন ($method-এ)")
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.notify("payment_approval", 99912, notif)
+    }
+
     override fun onDestroy() {
         isJoinedChallengesListenerActive?.remove()
+        paymentRequestListener?.remove()
         listeners.forEach { it.remove() }
         job.cancel()
         super.onDestroy()

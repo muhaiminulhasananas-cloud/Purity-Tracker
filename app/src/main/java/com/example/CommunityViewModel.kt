@@ -58,7 +58,9 @@ data class ChallengeMessage(
     val senderName: String = "",
     val senderEmail: String = "",
     val message: String = "",
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val voiceUrl: String = "",
+    val voiceDurationSec: Int = 0
 )
 
 class CommunityViewModel : ViewModel() {
@@ -246,14 +248,16 @@ class CommunityViewModel : ViewModel() {
             }
     }
 
-    fun sendChallengeMessage(challengeId: String, text: String) {
+    fun sendChallengeMessage(challengeId: String, text: String, voiceUrl: String = "", voiceDurationSec: Int = 0) {
         val user = auth.currentUser ?: return
         val msg = ChallengeMessage(
             challengeId = challengeId,
             senderName = user.displayName ?: "Anonymous Warrior",
             senderEmail = user.email ?: "",
             message = text,
-            timestamp = System.currentTimeMillis()
+            timestamp = System.currentTimeMillis(),
+            voiceUrl = voiceUrl,
+            voiceDurationSec = voiceDurationSec
         )
         db.collection("challenges").document(challengeId).collection("messages").add(msg)
     }

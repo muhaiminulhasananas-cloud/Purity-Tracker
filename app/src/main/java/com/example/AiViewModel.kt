@@ -101,7 +101,7 @@ data class ChatMessage(
     val isStreaming: Boolean = false
 )
 
-class AiViewModel : ViewModel() {
+class AiViewModel(application: android.app.Application) : androidx.lifecycle.AndroidViewModel(application) {
     private val _messages = MutableStateFlow<List<ChatMessage>>(
         listOf(
             ChatMessage(
@@ -135,6 +135,19 @@ class AiViewModel : ViewModel() {
         _isLoading.value = true
 
         viewModelScope.launch {
+            val context = getApplication<android.app.Application>().applicationContext
+            val isPremium = PremiumManager.isPremium.value
+            val count = PremiumManager.getDailyMsgCount(context)
+
+            if (!isPremium && count >= 3) {
+                _isLoading.value = false
+                _messages.value = _messages.value + ChatMessage(
+                    text = "limit_reached",
+                    isUser = false
+                )
+                return@launch
+            }
+
             val apiKey = BuildConfig.GEMINI_API_KEY
             if (apiKey == "MY_GEMINI_API_KEY" || apiKey.isBlank()) {
                 _isLoading.value = false
@@ -161,6 +174,11 @@ class AiViewModel : ViewModel() {
                 }
 
                 _isLoading.value = false
+
+                // Increment message count if not premium
+                if (!isPremium) {
+                    PremiumManager.incrementDailyMsgCount(context)
+                }
 
                 // Add an empty AI message that we will stream text additions into
                 val aiMessageId = java.util.UUID.randomUUID().toString()
