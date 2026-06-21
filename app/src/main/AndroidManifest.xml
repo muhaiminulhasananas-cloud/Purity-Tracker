@@ -48,6 +48,11 @@
             android:noHistory="true"
             android:excludeFromRecents="true" />
             
+        <activity
+            android:name="com.canhub.cropper.CropImageActivity"
+            android:theme="@style/Theme.MyApplication"
+            android:exported="true"/>
+            
         <service android:name=".LocalDnsVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:directBootAware="true"
@@ -89,6 +94,11 @@
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
+
+        <!-- AdMob App ID -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-3940256099942544~3347511713"/>
 
     </application>
 

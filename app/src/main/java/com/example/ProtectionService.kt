@@ -177,7 +177,9 @@ class ProtectionService : AccessibilityService() {
         // 3. STRICT PRE-FILTERING: Limit protection scanner strictly to settings, installer and VPN packages.
         val isSettingsPkg = pkgName.contains("settings") || pkgName.contains("safecenter") || 
                 pkgName.contains("securitycenter") || pkgName.contains("securityadd") || 
-                pkgName.contains("safeguard") || pkgName.contains("secure") || pkgName.contains("systemmanager")
+                pkgName.contains("safeguard") || pkgName.contains("secure") || pkgName.contains("systemmanager") ||
+                pkgName.contains("wireless") || pkgName.contains("network") || pkgName.contains("connectivity") ||
+                pkgName.contains("connection") || pkgName.contains("phone") || pkgName.contains("telephony")
         val isInstallerPkg = pkgName.contains("packageinstaller") || pkgName.contains("installer") || pkgName == "android" 
         val isVpnPkg = pkgName.contains("vpndialogs") || pkgName.contains("vpn") || pkgName == "android"
         
@@ -200,6 +202,45 @@ class ProtectionService : AccessibilityService() {
 
         // PRECISE CASE 1: VPN Disconnect system or configure dialog matching our app icon/name
         val isVpnDialogPkg = pkgName == "com.android.vpndialogs" || pkgName.contains("settings") || pkgName == "android"
+        
+        // PRECISE CASE 7: Private DNS Settings page blocking
+        val isPrivateDnsSettings = (pkgName.contains("settings") || pkgName.contains("wireless") || pkgName.contains("network") || pkgName.contains("connectivity") || pkgName.contains("connection") || pkgName.contains("phone")) && 
+                (windowText.contains("private dns") || 
+                 windowText.contains("designated private dns") || 
+                 windowText.contains("family.adguard-dns.com") || 
+                 windowText.contains("adguard") || 
+                 windowText.contains("প্রাইভেট ডিএনএস") || 
+                 windowText.contains("dns") || 
+                 windowText.contains("ডিএনএস"))
+                
+        if (isPrivateDnsSettings) {
+             val currentTime = System.currentTimeMillis()
+             if (currentTime - lastBlockTime > 1500) {
+                 lastBlockTime = currentTime
+                 
+                 performGlobalAction(GLOBAL_ACTION_HOME) // Go home to exit settings
+                 performGlobalAction(GLOBAL_ACTION_BACK) // Press back
+                 
+                 triggerGuardianAlert("attempted to modify Private DNS while protection is ON")
+                 
+                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                     if (LockManager.hasPin(this)) {
+                         val intent = Intent(this, PinLockActivity::class.java).apply {
+                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                         }
+                         startActivity(intent)
+                     } else {
+                         val intent = Intent(this, MainActivity::class.java).apply {
+                             action = "com.example.MOTIVATION"
+                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                         }
+                         startActivity(intent)
+                     }
+                 }, 600)
+             }
+             return
+        }
+        
         if (isVpnDialogPkg) {
             val hasVpnNameOnScreen = windowText.contains("purity tracker") || windowText.contains("purity shield")
             if (hasVpnNameOnScreen) {

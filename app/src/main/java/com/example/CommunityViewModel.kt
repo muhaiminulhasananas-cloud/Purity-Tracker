@@ -21,7 +21,10 @@ data class Post(
     val commentsCount: Int = 0,
     val timestamp: Long = System.currentTimeMillis(),
     val userId: String = "",
-    val userEmail: String = ""
+    val userEmail: String = "",
+    val isPremium: Boolean = false,
+    val imageUrl: String = "",
+    val videoUrl: String = ""
 )
 
 data class Comment(
@@ -30,14 +33,17 @@ data class Comment(
     val name: String = "",
     val content: String = "",
     val timestamp: Long = System.currentTimeMillis(),
-    val userEmail: String = ""
+    val userEmail: String = "",
+    val isPremium: Boolean = false
 )
 
 data class LeaderboardUser(
     val id: String = "",
     val name: String = "",
     val streakMs: Long = 0,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val isPremium: Boolean = false,
+    val badge: String = ""
 )
 
 data class Challenge(
@@ -60,7 +66,8 @@ data class ChallengeMessage(
     val message: String = "",
     val timestamp: Long = System.currentTimeMillis(),
     val voiceUrl: String = "",
-    val voiceDurationSec: Int = 0
+    val voiceDurationSec: Int = 0,
+    val isPremium: Boolean = false
 )
 
 class CommunityViewModel : ViewModel() {
@@ -76,18 +83,45 @@ class CommunityViewModel : ViewModel() {
     private val _comments = MutableStateFlow<Map<String, List<Comment>>>(emptyMap())
     val comments = _comments.asStateFlow()
 
+    private val _uploadProgress = MutableStateFlow<Float?>(null)
+    val uploadProgress = _uploadProgress.asStateFlow()
+
     private val _challenges = MutableStateFlow<List<Challenge>>(emptyList())
     val challenges = _challenges.asStateFlow()
 
     private val _challengeMessages = MutableStateFlow<Map<String, List<ChallengeMessage>>>(emptyMap())
     val challengeMessages = _challengeMessages.asStateFlow()
     
+    private val _premiumUsers = MutableStateFlow<Set<String>>(emptySet())
+    val premiumUsers = _premiumUsers.asStateFlow()
+    private val _premiumUserEmails = MutableStateFlow<Set<String>>(emptySet())
+    val premiumUserEmails = _premiumUserEmails.asStateFlow()
+
     init {
         fetchPosts()
         fetchLeaderboard()
         fetchChallenges()
+        fetchPremiumUsers()
     }
     
+    private fun fetchPremiumUsers() {
+        db.collection("users")
+            .whereEqualTo("isPremium", true)
+            .addSnapshotListener { snapshot, e ->
+                if (e != null) return@addSnapshotListener
+                if (snapshot != null) {
+                    val pUsers = snapshot.documents.map { it.id }.toSet()
+                    val pEmails = snapshot.documents.mapNotNull { it.getString("email") }.toSet()
+                    _premiumUsers.value = pUsers
+                    _premiumUserEmails.value = pEmails
+                }
+            }
+    }
+
+    fun refreshPosts() {
+        fetchPosts()
+    }
+
     private fun fetchPosts() {
         db.collection("posts")
             .orderBy("timestamp", Query.Direction.DESCENDING)
@@ -99,7 +133,7 @@ class CommunityViewModel : ViewModel() {
 
                 if (snapshot != null) {
                     val postList = snapshot.documents.mapNotNull { 
-                        it.toObject(Post::class.java)?.copy(id = it.id) 
+                        it.toObject(Post::class.java)?.copy(id = it.id, isPremium = it.getBoolean("isPremium") ?: false) 
                     }
                     _posts.value = postList
                 }
@@ -109,7 +143,7 @@ class CommunityViewModel : ViewModel() {
     private fun fetchLeaderboard() {
         db.collection("users")
             .orderBy("streakMs", Query.Direction.DESCENDING)
-            .limit(50)
+            .limit(10)
             .addSnapshotListener { snapshot, e ->
                 if (e != null) {
                     Log.w("CommunityViewModel", "Leaderboard Listen failed.", e)
@@ -117,7 +151,7 @@ class CommunityViewModel : ViewModel() {
                 }
                 if (snapshot != null) {
                     val leaderList = snapshot.documents.mapNotNull {
-                        it.toObject(LeaderboardUser::class.java)?.copy(id = it.id)
+                        it.toObject(LeaderboardUser::class.java)?.copy(id = it.id, isPremium = it.getBoolean("isPremium") ?: false)
                     }
                     _leaders.value = leaderList
                 }
@@ -239,7 +273,7 @@ class CommunityViewModel : ViewModel() {
                 if (e != null) return@addSnapshotListener
                 if (snapshot != null) {
                     val msgList = snapshot.documents.mapNotNull {
-                        it.toObject(ChallengeMessage::class.java)?.copy(id = it.id, challengeId = challengeId)
+                        it.toObject(ChallengeMessage::class.java)?.copy(id = it.id, challengeId = challengeId, isPremium = it.getBoolean("isPremium") ?: false)
                     }
                     _challengeMessages.value = _challengeMessages.value.toMutableMap().apply {
                         put(challengeId, msgList)
@@ -257,24 +291,74 @@ class CommunityViewModel : ViewModel() {
             message = text,
             timestamp = System.currentTimeMillis(),
             voiceUrl = voiceUrl,
-            voiceDurationSec = voiceDurationSec
+            voiceDurationSec = voiceDurationSec,
+            isPremium = PremiumManager.isPremium.value
         )
         db.collection("challenges").document(challengeId).collection("messages").add(msg)
     }
 
-    fun syncUserStreak(streakMs: Long) {
+    fun syncUserStreak(streakMs: Long, badgeName: String = "New Warrior", badgeImageUrl: String = "") {
         val user = auth.currentUser
         if (user != null) {
-            val userRecord = LeaderboardUser(
-                name = user.displayName ?: "Anonymous Warrior",
-                streakMs = streakMs,
-                timestamp = System.currentTimeMillis()
-            )
-            db.collection("users").document(user.uid).set(userRecord)
+            db.collection("users").document(user.uid).get().addOnSuccessListener { doc ->
+                val cloudStreakMs = doc.getLong("streakMs") ?: 0L
+                val cloudTimestamp = doc.getLong("timestamp") ?: 0L
+                val elapsed = System.currentTimeMillis() - cloudTimestamp
+                val realCloudStreak = cloudStreakMs + elapsed
+                
+                // If cloud is better than local by more than 5 minutes, DO NOT overwrite it.
+                // This prevents accidentally wiping the cloud streak when they just installed the app on a new device.
+                if (realCloudStreak > streakMs + 300000) {
+                     return@addOnSuccessListener
+                }
+                
+                val cloudPremium = doc.getBoolean("isPremium") ?: false
+                val isLocalPremium = PremiumManager.isPremium.value
+                val finalPremium = cloudPremium || isLocalPremium
+                
+                val userRecord = mutableMapOf<String, Any>(
+                    "name" to (user.displayName ?: "Anonymous Warrior"),
+                    "email" to (user.email ?: ""),
+                    "streakMs" to streakMs,
+                    "timestamp" to System.currentTimeMillis(),
+                    "isPremium" to finalPremium,
+                    "badge" to badgeName
+                )
+                if (badgeImageUrl.isNotEmpty()) {
+                    userRecord["profilePicUrl"] = badgeImageUrl
+                }
+                db.collection("users").document(user.uid).set(userRecord, com.google.firebase.firestore.SetOptions.merge())
+            }
         }
     }
     
-    fun addPost(content: String, streak: String, badge: String) {
+    fun uploadMediaAndAddPost(uri: android.net.Uri, isVideo: Boolean, content: String, streak: String, badge: String) {
+        val user = auth.currentUser ?: return
+        val storageRef = com.google.firebase.storage.FirebaseStorage.getInstance().reference
+        val fileName = "${user.uid}_${System.currentTimeMillis()}${if(isVideo) ".mp4" else ".jpg"}"
+        val fileRef = storageRef.child("posts_media/$fileName")
+        
+        _uploadProgress.value = 0f
+        
+        fileRef.putFile(uri).addOnProgressListener { snapshot ->
+            val progress = (100.0 * snapshot.bytesTransferred) / snapshot.totalByteCount
+            _uploadProgress.value = progress.toFloat()
+        }.addOnSuccessListener {
+            fileRef.downloadUrl.addOnSuccessListener { downloadUrl ->
+                if (isVideo) {
+                    addPost(content, streak, badge, imageUrl = "", videoUrl = downloadUrl.toString())
+                } else {
+                    addPost(content, streak, badge, imageUrl = downloadUrl.toString(), videoUrl = "")
+                }
+                _uploadProgress.value = null
+            }
+        }.addOnFailureListener { e ->
+            Log.e("CommunityViewModel", "Failed to upload media", e)
+            _uploadProgress.value = null
+        }
+    }
+
+    fun addPost(content: String, streak: String, badge: String, imageUrl: String = "", videoUrl: String = "") {
         val user = auth.currentUser
         if (user != null) {
             val post = Post(
@@ -287,7 +371,10 @@ class CommunityViewModel : ViewModel() {
                 commentsCount = 0,
                 timestamp = System.currentTimeMillis(),
                 userId = user.uid,
-                userEmail = user.email ?: ""
+                userEmail = user.email ?: "",
+                isPremium = PremiumManager.isPremium.value,
+                imageUrl = imageUrl,
+                videoUrl = videoUrl
             )
             db.collection("posts").add(post)
                 .addOnSuccessListener {
@@ -326,7 +413,7 @@ class CommunityViewModel : ViewModel() {
                 if (e != null) return@addSnapshotListener
                 if (snapshot != null) {
                     val commentList = snapshot.documents.mapNotNull {
-                        it.toObject(Comment::class.java)?.copy(id = it.id, postId = postId)
+                        it.toObject(Comment::class.java)?.copy(id = it.id, postId = postId, isPremium = it.getBoolean("isPremium") ?: false)
                     }
                     _comments.value = _comments.value.toMutableMap().apply {
                         put(postId, commentList)
@@ -342,7 +429,8 @@ class CommunityViewModel : ViewModel() {
             name = user.displayName ?: "Anonymous Warrior",
             content = content,
             timestamp = System.currentTimeMillis(),
-            userEmail = user.email ?: ""
+            userEmail = user.email ?: "",
+            isPremium = PremiumManager.isPremium.value
         )
         db.collection("posts").document(postId).collection("comments").add(comment)
         db.collection("posts").document(postId).update("commentsCount", FieldValue.increment(1))

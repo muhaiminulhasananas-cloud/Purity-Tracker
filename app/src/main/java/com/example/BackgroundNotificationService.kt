@@ -32,16 +32,32 @@ class BackgroundNotificationService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private var authStateListener: FirebaseAuth.AuthStateListener? = null
+    
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (auth.currentUser == null) {
-            return START_NOT_STICKY
-        }
-        
         setupNotificationChannels()
-        startListeningToChallenges()
         
-        if (auth.currentUser?.email == "muhaiminulhasananas@gmail.com") {
-            startListeningToPayments()
+        if (authStateListener == null) {
+            authStateListener = FirebaseAuth.AuthStateListener { firebaseAuth ->
+                val user = firebaseAuth.currentUser
+                if (user != null) {
+                    startListeningToChallenges()
+                    if (user.email == "muhaiminulhasananas@gmail.com") {
+                        startListeningToPayments()
+                    } else {
+                        paymentRequestListener?.remove()
+                        paymentRequestListener = null
+                    }
+                } else {
+                    isJoinedChallengesListenerActive?.remove()
+                    isJoinedChallengesListenerActive = null
+                    paymentRequestListener?.remove()
+                    paymentRequestListener = null
+                    listeners.forEach { it.remove() }
+                    listeners.clear()
+                }
+            }
+            auth.addAuthStateListener(authStateListener!!)
         }
 
         return START_STICKY

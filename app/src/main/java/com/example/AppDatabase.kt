@@ -30,6 +30,9 @@ interface SessionHistoryDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertHistory(history: SessionHistory)
+
+    @Query("DELETE FROM session_history")
+    suspend fun deleteAllHistory()
 }
 
 @Database(entities = [SessionHistory::class], version = 1, exportSchema = false)

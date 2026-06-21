@@ -75,7 +75,7 @@ fun PremiumPaywallScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(DeepBlue)
+            .background(Color.Transparent)
     ) {
         // Gradient glow background
         Box(
@@ -146,6 +146,81 @@ fun PremiumPaywallScreen(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            val isPremiumLocal by PremiumManager.isPremium.collectAsState()
+            val expiryTimeLocal by PremiumManager.premiumExpiryTimestamp.collectAsState()
+
+            if (isPremiumLocal) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFD700).copy(alpha = 0.08f)),
+                    border = BorderStroke(1.5.dp, Color(0xFFFFD700).copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(18.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "👑 ACTIVE WARRIOR PRO 👑",
+                            color = Color(0xFFFFD700),
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 1.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = pt(
+                                "Your recovery features and Golden VIP Crown/Blue Tick are fully active.",
+                                "আপনার সকল প্রিমিয়াম আত্মনিয়ন্ত্রণ ফিচার ও গোল্ডেন ভিআইপি ক্রাউন/ব্লু ব্যাজ সক্রিয় রয়েছে!"
+                            ),
+                            color = Color.White,
+                            fontSize = 11.5.sp,
+                            textAlign = TextAlign.Center,
+                            lineHeight = 16.sp
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        
+                        if (expiryTimeLocal > System.currentTimeMillis()) {
+                            val diffMs = expiryTimeLocal - System.currentTimeMillis()
+                            val daysLeft = diffMs / (24 * 60 * 60 * 1000L)
+                            val hoursLeft = (diffMs % (24 * 60 * 60 * 1000L)) / (60 * 60 * 1000L)
+                            val minsLeft = (diffMs % (60 * 60 * 1000L)) / (60 * 1000L)
+                            
+                            val countdownText = if (daysLeft > 1000) {
+                                pt("Lifetime Access ♾️", "আজীবন মেয়াদী অ্যাক্সেস ♾️")
+                            } else {
+                                pt(
+                                    "$daysLeft Days, $hoursLeft Hours, $minsLeft Min remaining",
+                                    "$daysLeft দিন, $hoursLeft ঘণ্টা, $minsLeft মিনিট মেয়াদ বাকি আছে"
+                                )
+                            }
+                            
+                            Box(
+                                modifier = Modifier
+                                    .background(Color(0xFF151F30), RoundedCornerShape(8.dp))
+                                    .border(1.dp, Color(0xFFFFD700).copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = countdownText,
+                                    color = Color(0xFFFFD700),
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = pt("Checking subscription validity...", "সাবস্ক্রিপশন মেয়াদ চেক করা হচ্ছে..."),
+                                color = Color.Gray,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
 
             // Glowing crown & logo
             val infiniteTransition = rememberInfiniteTransition()
@@ -228,7 +303,8 @@ fun PremiumPaywallScreen(
                         pt("Premium Adhans (Medina, Mecca, Al-Aqsa)", "মদীনা, মক্কা ও আল-আকসার প্রিমিয়াম রিংটোন ও অফলাইন আজান এলার্ট") to "notifications_active",
                         pt("Guardian SMS Relapse Incident Alert", "ভুল বা রিসেট হলে অটোমেটিক অভিভাবকের ফোনে ইনস্ট্যান্ট সিকিউর অ্যালার্ট") to "security",
                         pt("Golden VIP Crown Badge & Glowing Aura on Chat", "ভিআইপি গোল্ডেন প্রো ব্যাজ ও মেসেজে আকর্ষণীয় নেওন গ্লোয়িং বর্ডার") to "stars",
-                        pt("Detailed trigger, mood logs & protection charts", "আসক্তির ট্রিগার অ্যানালাইসিস ও বিস্তারিত প্রটেকশন চার্ট") to "analytics"
+                        pt("Detailed trigger, mood logs & protection charts", "আসক্তির ট্রিগার অ্যানালাইসিস ও বিস্তারিত প্রটেকশন চার্ট") to "analytics",
+                        pt("100% Ad-Free Experience", "১০০% অ্যাড-ফ্রি (কোনো বিরক্তি ছাড়া ফোকাস বৃদ্ধি)") to "block"
                     )
 
                     features.forEach { (text, iconStr) ->
@@ -244,6 +320,7 @@ fun PremiumPaywallScreen(
                                     "notifications_active" -> Icons.Default.NotificationsActive
                                     "security" -> Icons.Default.Shield
                                     "stars" -> Icons.Default.Stars
+                                    "block" -> Icons.Default.Block
                                     else -> Icons.Default.Leaderboard
                                 },
                                 contentDescription = null,
@@ -911,9 +988,19 @@ fun AdminPaymentsScreen(onBack: () -> Unit) {
                                                 batch.update(reqRef, "status", "approved")
                                                 
                                                 val userRef = dbRef.collection("users").document(request.userId)
+                                                val now = System.currentTimeMillis()
+                                                val durationDays = when (request.planId) {
+                                                    "monthly" -> 30L
+                                                    "yearly" -> 365L
+                                                    "family" -> 36500L
+                                                    else -> 30L
+                                                }
+                                                val expiry = now + (durationDays * 24L * 60L * 60L * 1000L)
                                                 val updates = mapOf(
                                                     "isPremium" to true,
-                                                    "premiumPlan" to request.planId
+                                                    "premiumPlan" to request.planId,
+                                                    "premiumStartTimestamp" to now,
+                                                    "premiumExpiryTimestamp" to expiry
                                                 )
                                                 batch.set(userRef, updates, com.google.firebase.firestore.SetOptions.merge())
                                                 

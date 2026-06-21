@@ -1,5 +1,8 @@
 package com.example
 
+import com.example.ui.theme.glassCard
+import com.example.ui.theme.GlassBackground
+
 import android.app.Application
 import android.content.Context
 import android.content.Intent
@@ -19,6 +22,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.pullrefresh.PullRefreshIndicator
+import androidx.compose.material.pullrefresh.pullRefresh
+import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -56,6 +62,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.animateColor
+import androidx.compose.ui.unit.TextUnit
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -66,8 +74,8 @@ import kotlinx.coroutines.launch
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
-val DeepBlue = Color(0xFF131D2D)
-val CardBlue = Color(0xFF1E2A40)
+val DeepBlue = Color(0x2B0B0F19)
+val CardBlue = Color(0x661E2D4A)
 val RedAlert = Color(0xFFE53E3E)
 val LightRed = Color(0xFFFF8A8A)
 val GreenText = Color(0xFF10B981)
@@ -1253,8 +1261,57 @@ class PurityTrackerViewModel(application: Application) : AndroidViewModel(applic
             )
             viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 sessionHistoryDao.insertHistory(history)
+                
+                // Keep history synchronized via Firestore subcollection
+                val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+                val user = auth.currentUser
+                if (user != null) {
+                    val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                    val historyRecord = mapOf(
+                        "title" to badgeName,
+                        "startTime" to start,
+                        "endTime" to endTime,
+                        "durationDays" to durationDays,
+                        "statusText" to "$durationDays days"
+                    )
+                    db.collection("users").document(user.uid)
+                        .collection("history").document(start.toString())
+                        .set(historyRecord, com.google.firebase.firestore.SetOptions.merge())
+                }
             }
         }
+    }
+
+    fun syncCloudHistoryToLocal(userId: String) {
+        val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+        db.collection("users").document(userId)
+            .collection("history").get()
+            .addOnSuccessListener { querySnapshot ->
+                if (querySnapshot != null && !querySnapshot.isEmpty) {
+                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        val localList = historyList.value
+                        val localStarts = localList.map { it.startTime }.toSet()
+                        
+                        for (doc in querySnapshot.documents) {
+                            val startTime = doc.getLong("startTime") ?: 0L
+                            if (startTime > 0 && !localStarts.contains(startTime)) {
+                                val title = doc.getString("title") ?: "Warrior"
+                                val endTime = doc.getLong("endTime") ?: 0L
+                                val durationDays = doc.getLong("durationDays")?.toInt() ?: 0
+                                val statusText = doc.getString("statusText") ?: ""
+                                val session = SessionHistory(
+                                    title = title,
+                                    startTime = startTime,
+                                    endTime = endTime,
+                                    durationDays = durationDays,
+                                    statusText = statusText
+                                )
+                                sessionHistoryDao.insertHistory(session)
+                            }
+                        }
+                    }
+                }
+            }
     }
 
     fun resetTimer(customBadges: List<CustomBadge> = emptyList()) {
@@ -1262,6 +1319,21 @@ class PurityTrackerViewModel(application: Application) : AndroidViewModel(applic
         saveHistoryBeforeReset(now, customBadges)
         _startTime.value = now
         prefs.edit().putLong("start_time", now).apply()
+        
+        // Force sync reset to cloud
+        val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+        val user = auth.currentUser
+        if (user != null) {
+            val userRecord = mapOf(
+                "name" to (user.displayName ?: "Anonymous Warrior"),
+                "email" to (user.email ?: ""),
+                "streakMs" to 0L,
+                "timestamp" to now
+            )
+            com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                .collection("users").document(user.uid)
+                .set(userRecord, com.google.firebase.firestore.SetOptions.merge())
+        }
     }
 
     fun resetTimerToDate(year: Int, month: Int, dayOfMonth: Int, customBadges: List<CustomBadge> = emptyList()) {
@@ -1273,6 +1345,30 @@ class PurityTrackerViewModel(application: Application) : AndroidViewModel(applic
         val finalTime = if (time > now) now else time
         _startTime.value = finalTime
         prefs.edit().putLong("start_time", finalTime).apply()
+        
+        // Force sync reset to cloud
+        val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+        val user = auth.currentUser
+        if (user != null) {
+            val streakMs = now - finalTime
+            val userRecord = mapOf(
+                "name" to (user.displayName ?: "Anonymous Warrior"),
+                "email" to (user.email ?: ""),
+                "streakMs" to streakMs,
+                "timestamp" to now
+            )
+            com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                .collection("users").document(user.uid)
+                .set(userRecord, com.google.firebase.firestore.SetOptions.merge())
+        }
+    }
+
+    fun clearAllData() {
+        _startTime.value = System.currentTimeMillis()
+        prefs.edit().clear().apply()
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            sessionHistoryDao.deleteAllHistory()
+        }
     }
 
     fun restoreStreak(newStartTime: Long) {
@@ -1334,6 +1430,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         PremiumManager.init(this)
         
+        com.google.android.gms.ads.MobileAds.initialize(this) {}
+        
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
@@ -1366,6 +1464,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val authViewModel: AuthViewModel = viewModel()
+            val purityTrackerViewModel: PurityTrackerViewModel = viewModel()
             val currentUser by authViewModel.currentUser.collectAsState()
             val context = androidx.compose.ui.platform.LocalContext.current
             
@@ -1376,13 +1475,42 @@ class MainActivity : ComponentActivity() {
                     listener = db.collection("users").document(currentUser!!.uid)
                         .addSnapshotListener { snapshot, e ->
                             if (e == null && snapshot != null && snapshot.exists()) {
+                                // Sync Premium (Cloud is the absolute source of truth)
                                 val isCloudPremium = snapshot.getBoolean("isPremium") ?: false
-                                val currentLocalPremium = PremiumManager.isPremium.value
-                                if (isCloudPremium != currentLocalPremium) {
-                                    PremiumManager.setPremiumStatus(context, isCloudPremium)
+                                val premiumExpiryTimestamp = snapshot.getLong("premiumExpiryTimestamp") ?: 0L
+                                val isExpired = premiumExpiryTimestamp != 0L && System.currentTimeMillis() > premiumExpiryTimestamp
+                                
+                                val finalPremium = if (isExpired) {
+                                    if (isCloudPremium) {
+                                        db.collection("users").document(currentUser!!.uid).update(
+                                            "isPremium", false,
+                                            "premiumPlan", "expired",
+                                            "premiumExpiryTimestamp", 0L
+                                        )
+                                    }
+                                    false
+                                } else {
+                                    isCloudPremium
+                                }
+                                
+                                val finalExpiry = if (isExpired) 0L else premiumExpiryTimestamp
+                                PremiumManager.setPremiumStatus(context, finalPremium, finalExpiry)
+                                
+                                // Sync Streak
+                                val cloudStreakMs = snapshot.getLong("streakMs") ?: 0L
+                                val cloudTimestamp = snapshot.getLong("timestamp") ?: 0L
+                                if (cloudStreakMs > 0 && cloudTimestamp > 0) {
+                                    val elapsed = System.currentTimeMillis() - cloudTimestamp
+                                    val realStreak = cloudStreakMs + elapsed
+                                    val currentStreak = System.currentTimeMillis() - purityTrackerViewModel.startTime.value
+                                    if (realStreak > currentStreak && (realStreak - currentStreak) > 60000) { // Only sync if cloud is ahead by more than 1 minute
+                                        purityTrackerViewModel.restoreStreak(System.currentTimeMillis() - realStreak)
+                                    }
                                 }
                             }
                         }
+                } else {
+                    PremiumManager.setPremiumStatus(context, false)
                 }
                 onDispose {
                     listener?.remove()
@@ -1465,23 +1593,47 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+fun BannerAdView(modifier: Modifier = Modifier) {
+    androidx.compose.ui.viewinterop.AndroidView(
+        modifier = modifier.fillMaxWidth(),
+        factory = { context ->
+            com.google.android.gms.ads.AdView(context).apply {
+                setAdSize(com.google.android.gms.ads.AdSize.BANNER)
+                adUnitId = "ca-app-pub-3940256099942544/6300978111"
+                loadAd(com.google.android.gms.ads.AdRequest.Builder().build())
+            }
+        }
+    )
+}
+
+@Composable
 fun AppScreen(currentTab: String, onTabSelected: (String) -> Unit) {
-    Scaffold(
-        bottomBar = { AppBottomNav(currentTab, onTabSelected) },
-        containerColor = MaterialTheme.colorScheme.background,
-        contentWindowInsets = WindowInsets.systemBars
-    ) { innerPadding ->
-        Box(modifier = Modifier.padding(innerPadding)) {
-            when (currentTab) {
-                "home" -> HomeScreen(onNavigateToPremium = { onTabSelected("premium") })
-                "history" -> HistoryScreen()
-                "focus" -> FocusScreen()
-                "ai" -> AiScreen(onNavigateToPremium = { onTabSelected("premium") })
-                "community" -> CommunityScreen()
-                "profile" -> ProfileScreen(onNavigateToStaticPage = onTabSelected, onNavigateToPremium = { onTabSelected("premium") })
-                "admin_badges" -> AdminBadgeScreen(onBack = { onTabSelected("profile") })
-                "admin_payments" -> AdminPaymentsScreen(onBack = { onTabSelected("profile") })
-                "premium" -> PremiumPaywallScreen(onClose = { onTabSelected("home") })
+    val isPremium by PremiumManager.isPremium.collectAsState()
+    GlassBackground {
+        Scaffold(
+            bottomBar = { 
+                Column {
+                    if (!isPremium && currentTab != "premium") {
+                        BannerAdView(modifier = Modifier.background(Color.Transparent))
+                    }
+                    AppBottomNav(currentTab, onTabSelected)
+                }
+            },
+            containerColor = Color.Transparent,
+            contentWindowInsets = WindowInsets.systemBars
+        ) { innerPadding ->
+            Box(modifier = Modifier.padding(innerPadding)) {
+                when (currentTab) {
+                    "home" -> HomeScreen(onNavigateToPremium = { onTabSelected("premium") })
+                    "history" -> HistoryScreen()
+                    "focus" -> FocusScreen()
+                    "ai" -> AiScreen(onNavigateToPremium = { onTabSelected("premium") })
+                    "community" -> CommunityScreen()
+                    "profile" -> ProfileScreen(onNavigateToStaticPage = onTabSelected, onNavigateToPremium = { onTabSelected("premium") })
+                    "admin_badges" -> AdminBadgeScreen(onBack = { onTabSelected("profile") })
+                    "admin_payments" -> AdminPaymentsScreen(onBack = { onTabSelected("profile") })
+                    "premium" -> PremiumPaywallScreen(onClose = { onTabSelected("home") })
+                }
             }
         }
     }
@@ -1490,8 +1642,11 @@ fun AppScreen(currentTab: String, onTabSelected: (String) -> Unit) {
 @Composable
 fun AppBottomNav(currentTab: String, onTabSelected: (String) -> Unit) {
     NavigationBar(
-        containerColor = Color(0xFF151F30),
-        tonalElevation = 8.dp
+        containerColor = Color.Transparent,
+        tonalElevation = 0.dp,
+        modifier = Modifier
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .glassCard(cornerSize = 24.dp)
     ) {
         NavigationBarItem(
             icon = { Icon(Icons.Filled.Home, contentDescription = "Home") },
@@ -2117,16 +2272,134 @@ fun SalahItem(title: String, desc: String, timeRange: String, checked: Boolean, 
 }
 
 @Composable
-fun CommunityScreen(communityViewModel: CommunityViewModel = viewModel(), authViewModel: AuthViewModel = viewModel()) {
+fun ProBadge() {
+    val infiniteTransition = androidx.compose.animation.core.rememberInfiniteTransition(label = "pro_anim")
+    val glowScale by infiniteTransition.animateFloat(
+        initialValue = 0.95f,
+        targetValue = 1.08f,
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            animation = androidx.compose.animation.core.tween(1000, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+        ),
+        label = "glowScale"
+    )
+    Row(
+        modifier = Modifier
+            .background(Color(0xFF221D02), RoundedCornerShape(6.dp))
+            .border(1.dp, Color(0xFFFFD700).copy(alpha = 0.8f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+            .scale(glowScale),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("PRO", color = Color(0xFFFFD700), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.width(3.dp))
+        Text("👑", fontSize = 11.sp)
+    }
+}
+
+@Composable
+fun ProBlueBadge(size: androidx.compose.ui.unit.Dp = 14.dp) {
+    Icon(
+        imageVector = Icons.Filled.Verified,
+        contentDescription = "Verified Pro Member",
+        tint = Color(0xFF1DA1F2), // Gorgeous Twitter/Verified Blue
+        modifier = Modifier.size(size)
+    )
+}
+
+@Composable
+fun PremiumNameText(
+    name: String,
+    isPremium: Boolean,
+    defaultColor: Color,
+    fontSize: TextUnit = 11.sp,
+    fontWeight: FontWeight = FontWeight.Normal
+) {
+    if (isPremium) {
+        val infiniteTransition = androidx.compose.animation.core.rememberInfiniteTransition(label = "premium_name_anim")
+        
+        val scale by infiniteTransition.animateFloat(
+            initialValue = 0.98f,
+            targetValue = 1.04f,
+            animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                animation = androidx.compose.animation.core.tween(1200, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+                repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+            ),
+            label = "scale"
+        )
+        
+        val goldColor by infiniteTransition.animateColor(
+            initialValue = Color(0xFFFFD700), // Vibrant Gold
+            targetValue = Color(0xFFFFF6CA), // Radiant Light Gold
+            animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                animation = androidx.compose.animation.core.tween(1500, easing = androidx.compose.animation.core.LinearEasing),
+                repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+            ),
+            label = "color"
+        )
+        
+        Text(
+            text = name,
+            color = goldColor,
+            fontSize = fontSize,
+            fontWeight = FontWeight.Black,
+            modifier = Modifier.scale(scale),
+            style = androidx.compose.ui.text.TextStyle(
+                shadow = androidx.compose.ui.graphics.Shadow(
+                    color = Color(0xBBFF9E0D),
+                    offset = androidx.compose.ui.geometry.Offset(1.5f, 1.5f),
+                    blurRadius = 4f
+                )
+            )
+        )
+    } else {
+        Text(
+            text = name,
+            color = defaultColor,
+            fontSize = fontSize,
+            fontWeight = fontWeight
+        )
+    }
+}
+
+@OptIn(androidx.compose.material.ExperimentalMaterialApi::class)
+@Composable
+fun CommunityScreen(
+    communityViewModel: CommunityViewModel = viewModel(),
+    authViewModel: AuthViewModel = viewModel(),
+    purityTrackerViewModel: PurityTrackerViewModel = viewModel(),
+    badgesViewModel: BadgesViewModel = viewModel(),
+    socialViewModel: SocialViewModel = viewModel(),
+    userProfileViewModel: UserProfileViewModel = viewModel()
+) {
+    val context = LocalContext.current
     val posts by communityViewModel.posts.collectAsState()
     val leaders by communityViewModel.leaders.collectAsState()
     val currentUser by authViewModel.currentUser.collectAsState()
+    val isPremiumUserState by PremiumManager.isPremium.collectAsState()
+    val uploadProgress by communityViewModel.uploadProgress.collectAsState()
     var postText by remember { mutableStateOf("") }
     
-    var activeTab by remember { mutableStateOf("feed") } // "feed" or "challenges"
+    var selectedUserIdForProfile by remember { mutableStateOf<String?>(null) }
+    var selectedUserProfile by remember { mutableStateOf<UserProfile?>(null) }
+    
+    val durationMs by purityTrackerViewModel.durationMs.collectAsState()
+    val dynamicBadges by badgesViewModel.badges.collectAsState()
+    val days = java.util.concurrent.TimeUnit.MILLISECONDS.toDays(durationMs).toInt()
+    val currentBadge = dynamicBadges.lastOrNull { days >= it.requiredDays } ?: dynamicBadges.firstOrNull() ?: CustomBadge("", "None", 0, "None")
+    val activeBadgeName = currentBadge.name
+    
+    var activeTab by remember { mutableStateOf("board") } // "feed" or "challenges"
     var activeChatChallenge by remember { mutableStateOf<Challenge?>(null) }
+    var activeCommunityChat by remember { mutableStateOf<UserProfile?>(null) }
 
-    if (activeChatChallenge != null) {
+    if (activeCommunityChat != null) {
+        PrivateChatScreen(
+            friendId = activeCommunityChat!!.userId,
+            socialViewModel = socialViewModel,
+            onBack = { activeCommunityChat = null }
+        )
+    } else if (activeChatChallenge != null) {
         ChallengeChatRoom(
             challenge = activeChatChallenge!!,
             communityViewModel = communityViewModel,
@@ -2142,32 +2415,47 @@ fun CommunityScreen(communityViewModel: CommunityViewModel = viewModel(), authVi
                     .background(CardBlue)
                     .padding(4.dp)
             ) {
+                // 1. Posts (board)
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (activeTab == "feed") CyanAccent else Color.Transparent)
-                        .clickable { activeTab = "feed" }
+                        .background(if (activeTab == "board") CyanAccent else Color.Transparent)
+                        .clickable { activeTab = "board" }
                         .padding(vertical = 12.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            Icons.Filled.Public,
-                            contentDescription = null,
-                            tint = if (activeTab == "feed") DeepBlue else Color.LightGray,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = t("tab_global"),
-                            color = if (activeTab == "feed") DeepBlue else Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
+                            Icons.Filled.DynamicFeed,
+                            contentDescription = "Posts",
+                            tint = if (activeTab == "board") Color.Black else Color.LightGray,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
                 }
 
+                // 2. Friends (friends)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (activeTab == "friends") CyanAccent else Color.Transparent)
+                        .clickable { activeTab = "friends" }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.Chat,
+                            contentDescription = "Friends",
+                            tint = if (activeTab == "friends") Color.Black else Color.LightGray,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
+
+                // 3. Group Chat (challenges)
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -2180,16 +2468,29 @@ fun CommunityScreen(communityViewModel: CommunityViewModel = viewModel(), authVi
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
                             Icons.Filled.People,
-                            contentDescription = null,
-                            tint = if (activeTab == "challenges") DeepBlue else Color.LightGray,
-                            modifier = Modifier.size(18.dp)
+                            contentDescription = "Group Chat",
+                            tint = if (activeTab == "challenges") Color.Black else Color.LightGray,
+                            modifier = Modifier.size(24.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = t("tab_challenges"),
-                            color = if (activeTab == "challenges") DeepBlue else Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
+                    }
+                }
+
+                // 4. Leaderboard (feed)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (activeTab == "feed") CyanAccent else Color.Transparent)
+                        .clickable { activeTab = "feed" }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.EmojiEvents,
+                            contentDescription = "Leaderboard",
+                            tint = if (activeTab == "feed") Color.Black else Color.LightGray,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
                 }
@@ -2211,20 +2512,26 @@ fun CommunityScreen(communityViewModel: CommunityViewModel = viewModel(), authVi
                     } else {
                         leaders.forEachIndexed { index, leader ->
                             val days = java.util.concurrent.TimeUnit.MILLISECONDS.toDays(leader.streakMs).toInt()
-                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            val isLeaderPremium = leader.isPremium || (leader.id == currentUser?.uid && isPremiumUserState)
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text("${index + 1}.", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.width(28.dp))
                                 Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                                    Text(leader.name, color = Color.White)
-                                    val isMe = leader.id == (currentUser?.uid ?: "")
-                                    val isPremiumUserState by PremiumManager.isPremium.collectAsState()
-                                    if (isMe && isPremiumUserState) {
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Icon(
-                                            imageVector = Icons.Filled.Star,
-                                            contentDescription = "Pro",
-                                            tint = Color(0xFFFFD700),
-                                            modifier = Modifier.size(16.dp)
-                                        )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Box(modifier = Modifier.weight(1f, fill = false)) {
+                                                PremiumNameText(
+                                                    name = leader.name,
+                                                    isPremium = isLeaderPremium,
+                                                    defaultColor = Color.White,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = FontWeight.Normal
+                                                )
+                                            }
+                                            if (isLeaderPremium) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                ProBlueBadge(size = 14.dp)
+                                            }
+                                        }
                                     }
                                 }
                                 
@@ -2233,62 +2540,146 @@ fun CommunityScreen(communityViewModel: CommunityViewModel = viewModel(), authVi
                             }
                         }
                     }
+                }
+            } else if (activeTab == "board") {
+                var isRefreshing by remember { mutableStateOf(false) }
+                val scope = rememberCoroutineScope()
+                val pullRefreshState = rememberPullRefreshState(
+                    refreshing = isRefreshing,
+                    onRefresh = {
+                        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            isRefreshing = true
+                            communityViewModel.refreshPosts()
+                            kotlinx.coroutines.delay(1000)
+                            isRefreshing = false
+                        }
+                    }
+                )
 
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text("Post your progress", color = Color.White, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = CardBlue)) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            OutlinedTextField(
-                                value = postText,
-                                onValueChange = { postText = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                placeholder = { Text("Write something inspiring to fuel other warriors...", color = Color.LightGray, fontSize = 14.sp) },
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    unfocusedBorderColor = Color.Gray,
-                                    focusedBorderColor = CyanAccent,
-                                    unfocusedTextColor = Color.White,
-                                    focusedTextColor = Color.White
+                Box(modifier = Modifier.fillMaxSize().pullRefresh(pullRefreshState)) {
+                    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Post your progress", color = Color.White, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = CardBlue)) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                OutlinedTextField(
+                                    value = postText,
+                                    onValueChange = { postText = it },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    placeholder = { Text("Write something inspiring to fuel other warriors...", color = Color.LightGray, fontSize = 14.sp) },
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        unfocusedBorderColor = Color.Gray,
+                                        focusedBorderColor = CyanAccent,
+                                        unfocusedTextColor = Color.White,
+                                        focusedTextColor = Color.White
+                                    )
                                 )
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Button(
-                                onClick = { 
-                                    if (postText.isNotBlank()) {
-                                        communityViewModel.addPost(postText, "Active Streak: Unknown", "Novice")
-                                        postText = ""
+                                Spacer(modifier = Modifier.height(16.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Button(
+                                        onClick = { 
+                                            if (postText.isNotBlank()) {
+                                                val streakText = if (LanguageStore.currentLanguage.value == "bn") "${days} দিনের বিশুদ্ধ পথচলা 🔥" else "${days} Days Streak 🔥"
+                                                communityViewModel.addPost(postText, streakText, activeBadgeName)
+                                                postText = ""
+                                            }
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444))
+                                    ) {
+                                        Text("Publish Status", color = Color.White)
                                     }
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                  Text("Publish Status", color = Color.White)
+                                }
+                                
+                                if (uploadProgress != null) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text("Uploading: ${uploadProgress!!.toInt()}%", color = CyanAccent, fontSize = 12.sp)
+                                    androidx.compose.material3.LinearProgressIndicator(progress = uploadProgress!! / 100f, modifier = Modifier.fillMaxWidth(), color = CyanAccent, trackColor = Color.DarkGray)
+                                }
                             }
                         }
-                    }
 
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text("Latest Motivational Board", color = Color.White, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Text("Latest Motivational Board", color = Color.White, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        if (posts.isEmpty()) {
+                            Text("Loading posts or no posts yet...", color = Color.LightGray)
+                        } else {
+                            posts.forEach { post ->
+                                CommunityPost(
+                                    post = post,
+                                    currentUserId = currentUser?.uid ?: "",
+                                    communityViewModel = communityViewModel,
+                                    onUserClicked = { clickedId ->
+                                        selectedUserIdForProfile = clickedId
+                                        val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                                        db.collection("users").document(clickedId).get().addOnSuccessListener { doc ->
+                                            if (doc.exists()) {
+                                                selectedUserProfile = doc.toObject(UserProfile::class.java)
+                                                if (selectedUserProfile != null && selectedUserProfile!!.userId.isEmpty()) {
+                                                    selectedUserProfile = selectedUserProfile!!.copy(userId = doc.id)
+                                                }
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(100.dp))
+                    }
                     
-                    if (posts.isEmpty()) {
-                        Text("Loading posts or no posts yet...", color = Color.LightGray)
-                    } else {
-                        posts.forEach { post ->
-                            CommunityPost(
-                                post = post,
+                    if (selectedUserIdForProfile != null) {
+                        if (selectedUserProfile == null) {
+                            Box(modifier = Modifier.fillMaxSize().background(Color(0xE60F172A)).clickable { }, contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(color = CyanAccent)
+                            }
+                        } else {
+                            UserDetailScreen(
+                                userProfile = selectedUserProfile!!,
                                 currentUserId = currentUser?.uid ?: "",
-                                communityViewModel = communityViewModel
+                                socialViewModel = socialViewModel,
+                                communityViewModel = communityViewModel,
+                                onBack = { 
+                                    selectedUserIdForProfile = null
+                                    selectedUserProfile = null
+                                },
+                                onOpenChat = { friendProfile ->
+                                    selectedUserIdForProfile = null
+                                    selectedUserProfile = null
+                                    activeCommunityChat = friendProfile
+                                }
                             )
                         }
                     }
+                    
+                    PullRefreshIndicator(
+                        refreshing = isRefreshing,
+                        state = pullRefreshState,
+                        modifier = Modifier.align(Alignment.TopCenter),
+                        contentColor = CyanAccent
+                    )
                 }
-            } else {
+            } else if (activeTab == "challenges") {
                 ChallengesTabContent(
                     communityViewModel = communityViewModel,
                     currentUserEmail = currentUser?.email ?: "",
                     onOpenChat = { challenge ->
                         activeChatChallenge = challenge
+                    }
+                )
+            } else if (activeTab == "friends") {
+                FriendsListScreen(
+                    socialViewModel = socialViewModel,
+                    onBack = { activeTab = "feed" },
+                    onOpenChat = { friendId -> 
+                        val profile = UserProfile(userId = friendId)
+                        activeCommunityChat = profile
                     }
                 )
             }
@@ -2876,6 +3267,8 @@ fun ChallengeChatRoom(
     val messages = messagesMap[challenge.id] ?: emptyList()
     var inputMsg by remember { mutableStateOf("") }
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val isPremiumUserState by PremiumManager.isPremium.collectAsState()
+    val premiumUsers by communityViewModel.premiumUsers.collectAsState()
     val context = LocalContext.current
     val voicePlayerManager = remember { VoicePlayerManager(context) }
 
@@ -2998,7 +3391,7 @@ fun ChallengeChatRoom(
         communityViewModel.fetchChallengeMessages(challenge.id)
     }
 
-    Column(modifier = Modifier.fillMaxSize().background(DeepBlue)) {
+    Column(modifier = Modifier.fillMaxSize().background(Color.Transparent)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -3047,13 +3440,43 @@ fun ChallengeChatRoom(
                         Column(
                             horizontalAlignment = if (isMe) Alignment.End else Alignment.Start
                         ) {
+                            val premiumUserEmailsList by communityViewModel.premiumUserEmails.collectAsState()
+                            val isSenderPremium = msg.isPremium || msg.senderEmail == "muhaiminulhasananas@gmail.com" || premiumUserEmailsList.contains(msg.senderEmail) || (isMe && isPremiumUserState)
                             if (!isMe) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(msg.senderName, color = CyanAccent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    PremiumNameText(
+                                        name = msg.senderName,
+                                        isPremium = isSenderPremium,
+                                        defaultColor = CyanAccent,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    if (isSenderPremium) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        ProBlueBadge(size = 12.dp)
+                                    }
                                     if (msg.senderEmail == "muhaiminulhasananas@gmail.com") {
                                         Spacer(modifier = Modifier.width(4.dp))
                                         Icon(Icons.Filled.Verified, contentDescription = "Admin", tint = CyanAccent, modifier = Modifier.size(12.dp))
                                     }
+                                }
+                            } else {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (isSenderPremium) {
+                                        ProBlueBadge(size = 12.dp)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                    }
+                                    if (msg.senderEmail == "muhaiminulhasananas@gmail.com") {
+                                        Icon(Icons.Filled.Verified, contentDescription = "Admin", tint = CyanAccent, modifier = Modifier.size(12.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                    }
+                                    PremiumNameText(
+                                        name = "You",
+                                        isPremium = isSenderPremium,
+                                        defaultColor = Color.LightGray,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
                             Spacer(modifier = Modifier.height(2.dp))
@@ -3386,8 +3809,9 @@ fun ChallengeCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp),
-        colors = CardDefaults.cardColors(containerColor = CardBlue)
+            .padding(vertical = 8.dp)
+            .glassCard(cornerSize = 16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -3464,7 +3888,7 @@ fun ChallengeChatRoomOld(
         communityViewModel.fetchChallengeMessages(challenge.id)
     }
 
-    Column(modifier = Modifier.fillMaxSize().background(DeepBlue)) {
+    Column(modifier = Modifier.fillMaxSize().background(Color.Transparent)) {
         // Custom Chat Header
         Row(
             modifier = Modifier
@@ -3515,13 +3939,43 @@ fun ChallengeChatRoomOld(
                         Column(
                             horizontalAlignment = if (isMe) Alignment.End else Alignment.Start
                         ) {
+                            val premiumUserEmailsList by communityViewModel.premiumUserEmails.collectAsState()
+                            val isSenderPremium = msg.isPremium || msg.senderEmail == "muhaiminulhasananas@gmail.com" || premiumUserEmailsList.contains(msg.senderEmail) || (isMe && PremiumManager.isPremium.value)
                             if (!isMe) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(msg.senderName, color = CyanAccent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    PremiumNameText(
+                                        name = msg.senderName,
+                                        isPremium = isSenderPremium,
+                                        defaultColor = CyanAccent,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    if (isSenderPremium) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        ProBlueBadge(size = 12.dp)
+                                    }
                                     if (msg.senderEmail == "muhaiminulhasananas@gmail.com") {
                                         Spacer(modifier = Modifier.width(4.dp))
                                         Icon(Icons.Filled.Verified, contentDescription = "Admin", tint = CyanAccent, modifier = Modifier.size(12.dp))
                                     }
+                                }
+                            } else {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (isSenderPremium) {
+                                        ProBlueBadge(size = 12.dp)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                    }
+                                    if (msg.senderEmail == "muhaiminulhasananas@gmail.com") {
+                                        Icon(Icons.Filled.Verified, contentDescription = "Admin", tint = CyanAccent, modifier = Modifier.size(12.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                    }
+                                    PremiumNameText(
+                                        name = "You",
+                                        isPremium = isSenderPremium,
+                                        defaultColor = Color.LightGray,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
                             Spacer(modifier = Modifier.height(2.dp))
@@ -3586,19 +4040,35 @@ fun ChallengeChatRoomOld(
 }
 
 @Composable
-fun CommunityPost(post: Post, currentUserId: String, communityViewModel: CommunityViewModel) {
+fun CommunityPost(post: Post, currentUserId: String, communityViewModel: CommunityViewModel, onUserClicked: (String) -> Unit = {}) {
     val context = LocalContext.current
     val hasLiked = post.likedBy.contains(currentUserId)
     var showComments by remember { mutableStateOf(false) }
     var commentText by remember { mutableStateOf("") }
+    val premiumUsers by communityViewModel.premiumUsers.collectAsState()
+    val isPremiumUserState by PremiumManager.isPremium.collectAsState()
+    val currentUserEmail = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.email ?: ""
     
     Card(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp), colors = CardDefaults.cardColors(containerColor = CardBlue)) {
         Column(modifier = Modifier.padding(16.dp)) {
              Row(verticalAlignment = Alignment.CenterVertically) {
-                 Box(modifier = Modifier.size(40.dp).background(CyanAccent, CircleShape))
+                 Box(modifier = Modifier.size(40.dp).background(CyanAccent, CircleShape).clickable { onUserClicked(post.userId) })
                  Spacer(modifier = Modifier.width(12.dp))
-                 Column(modifier = Modifier.weight(1f)) {
-                      Text(post.name, color = Color.White, fontWeight = FontWeight.Bold)
+                 Column(modifier = Modifier.weight(1f).clickable { onUserClicked(post.userId) }) {
+                     val isPostPremium = post.isPremium || post.userEmail == "muhaiminulhasananas@gmail.com" || premiumUsers.contains(post.userId) || (post.userId == currentUserId && isPremiumUserState)
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          PremiumNameText(
+                              name = post.name,
+                              isPremium = isPostPremium,
+                              defaultColor = Color.White,
+                              fontSize = 14.sp,
+                              fontWeight = FontWeight.Bold
+                          )
+                          if (isPostPremium) {
+                              Spacer(modifier = Modifier.width(4.dp))
+                              ProBlueBadge(size = 14.dp)
+                          }
+                      }
                       if (post.userEmail == "muhaiminulhasananas@gmail.com") {
                           Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)) {
                               Icon(Icons.Filled.Verified, contentDescription = "Admin", tint = CyanAccent, modifier = Modifier.size(18.dp))
@@ -3608,12 +4078,45 @@ fun CommunityPost(post: Post, currentUserId: String, communityViewModel: Communi
                       }
                       Text(post.streak, color = Color.LightGray, fontSize = 12.sp)
                  }
-                 Box(modifier = Modifier.background(DeepBlue, RoundedCornerShape(4.dp)).border(1.dp, CyanAccent, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) {
-                      Text(post.badge, color = CyanAccent, fontSize = 10.sp)
-                 }
              }
              Spacer(modifier = Modifier.height(12.dp))
              Text(post.content, color = Color.White, fontSize = 14.sp)
+             
+             if (post.imageUrl.isNotEmpty()) {
+                 Spacer(modifier = Modifier.height(12.dp))
+                 coil.compose.AsyncImage(
+                     model = post.imageUrl,
+                     contentDescription = "Post Image",
+                     modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp).clip(RoundedCornerShape(8.dp)),
+                     contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                 )
+             }
+             if (post.videoUrl.isNotEmpty()) {
+                 Spacer(modifier = Modifier.height(12.dp))
+                 var isPlaying by remember { mutableStateOf(false) }
+                 if (!isPlaying) {
+                     Box(
+                         modifier = Modifier.fillMaxWidth().height(200.dp).background(Color.Black, RoundedCornerShape(8.dp)).clickable { isPlaying = true },
+                         contentAlignment = Alignment.Center
+                     ) {
+                         Icon(Icons.Filled.PlayCircle, contentDescription = "Play Video", tint = Color.White, modifier = Modifier.size(64.dp))
+                     }
+                 } else {
+                     androidx.compose.ui.viewinterop.AndroidView(
+                         factory = { ctx ->
+                             android.widget.VideoView(ctx).apply {
+                                 setVideoURI(android.net.Uri.parse(post.videoUrl))
+                                 val controller = android.widget.MediaController(ctx)
+                                 controller.setAnchorView(this)
+                                 setMediaController(controller)
+                                 setOnPreparedListener { it.start() }
+                             }
+                         },
+                         modifier = Modifier.fillMaxWidth().height(300.dp).clip(RoundedCornerShape(8.dp))
+                     )
+                 }
+             }
+
              Spacer(modifier = Modifier.height(12.dp))
              Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier=Modifier.fillMaxWidth()) {
                  Row(verticalAlignment = Alignment.CenterVertically) {
@@ -3660,7 +4163,23 @@ fun CommunityPost(post: Post, currentUserId: String, communityViewModel: Communi
                  } else {
                      postComments.forEach { comment ->
                          Column(modifier = Modifier.padding(bottom = 8.dp)) {
-                             Text(comment.name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                  val premiumUserEmailsList by communityViewModel.premiumUserEmails.collectAsState()
+                                  val isCommenterPremium = comment.isPremium || comment.userEmail == "muhaiminulhasananas@gmail.com" || premiumUserEmailsList.contains(comment.userEmail) || (comment.userEmail == currentUserEmail && isPremiumUserState)
+                                  PremiumNameText(
+                                      name = comment.name,
+                                      isPremium = isCommenterPremium,
+                                      defaultColor = Color.White,
+                                      fontSize = 12.sp,
+                                      fontWeight = FontWeight.Bold
+                                  )
+                                  if (isCommenterPremium) {
+                                      Spacer(modifier = Modifier.width(4.dp))
+                                      ProBlueBadge(size = 12.dp)
+
+                                  }
+                              }
+                              // removed isCommenterPremium2
                              if (comment.userEmail == "muhaiminulhasananas@gmail.com") {
                                  Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)) {
                                      Icon(Icons.Filled.Verified, contentDescription = "Admin", tint = CyanAccent, modifier = Modifier.size(14.dp))
@@ -3709,6 +4228,8 @@ fun ProfileScreen(
     authViewModel: AuthViewModel = viewModel(),
     purityTrackerViewModel: PurityTrackerViewModel = viewModel(),
     communityViewModel: CommunityViewModel = viewModel(),
+    userProfileViewModel: UserProfileViewModel = viewModel(),
+    socialViewModel: SocialViewModel = viewModel(),
     onNavigateToStaticPage: (String) -> Unit = {},
     onNavigateToPremium: (() -> Unit)? = null
 ) {
@@ -3736,20 +4257,50 @@ fun ProfileScreen(
     // Attempt to migrate cloud streak when logging in
     LaunchedEffect(currentUser) {
         if (currentUser != null) {
+            userProfileViewModel.fetchProfile(currentUser!!.uid)
+            purityTrackerViewModel.syncCloudHistoryToLocal(currentUser!!.uid)
             val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
             db.collection("users").document(currentUser!!.uid).get().addOnSuccessListener { doc ->
                 val record = doc.toObject(LeaderboardUser::class.java)
-                if (record != null && record.streakMs > 0) {
-                    val elapsed = System.currentTimeMillis() - record.timestamp
-                    val realStreak = record.streakMs + elapsed
-                    val currentStreak = System.currentTimeMillis() - purityTrackerViewModel.startTime.value
-                    if (realStreak > currentStreak) {
+                if (record != null) {
+                    val isLocalPremium = PremiumManager.isPremium.value
+                    if (doc.getBoolean("isPremium") == true || isLocalPremium) {
+                        PremiumManager.setPremiumStatus(context, true)
+                    }
+                    
+                    if (record.streakMs > 0) {
+                        val elapsed = System.currentTimeMillis() - record.timestamp
+                        val realStreak = record.streakMs + elapsed
                         purityTrackerViewModel.restoreStreak(System.currentTimeMillis() - realStreak)
-                        android.widget.Toast.makeText(context, "Cloud sync: Restored your previous streak!", android.widget.Toast.LENGTH_LONG).show()
+                        android.widget.Toast.makeText(context, "Cloud sync: Restored your data!", android.widget.Toast.LENGTH_LONG).show()
+                    } else if (record.timestamp > 0) {
+                        purityTrackerViewModel.restoreStreak(System.currentTimeMillis())
                     }
                 }
             }
         }
+    }
+
+    var activeView by remember { mutableStateOf("profile") }
+    var chatFriendId by remember { mutableStateOf("") }
+
+    if (activeView == "friends") {
+        FriendsListScreen(
+            socialViewModel = socialViewModel,
+            onBack = { activeView = "profile" },
+            onOpenChat = { friendId ->
+                chatFriendId = friendId
+                activeView = "chat"
+            }
+        )
+        return
+    } else if (activeView == "chat") {
+        PrivateChatScreen(
+            friendId = chatFriendId,
+            socialViewModel = socialViewModel,
+            onBack = { activeView = "friends" }
+        )
+        return
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
@@ -3757,444 +4308,28 @@ fun ProfileScreen(
          Spacer(modifier = Modifier.height(24.dp))
          
          if (currentUser == null) {
-             var isPasswordlessMode by remember { mutableStateOf(false) }
-             var isSignUpMode by remember { mutableStateOf(true) }       // Default to sign up mode
-             var name by remember { mutableStateOf("") }
-             var email by remember { mutableStateOf("") }
-             var password by remember { mutableStateOf("") }
-             var isPasswordVisible by remember { mutableStateOf(false) }
-             var isLoading by remember { mutableStateOf(false) }
-
-             Box(
-                 modifier = Modifier
-                     .fillMaxWidth()
-                     .background(
-                         brush = androidx.compose.ui.graphics.Brush.verticalGradient(
-                             colors = listOf(
-                                 CardBlue,
-                                 DeepBlue
-                             )
-                         ),
-                         shape = RoundedCornerShape(20.dp)
-                     )
-                     .border(1.2.dp, CyanAccent.copy(alpha = 0.25f), RoundedCornerShape(20.dp))
-                     .padding(18.dp),
-                  contentAlignment = Alignment.Center
-              ) {
-                  Column(
-                      horizontalAlignment = Alignment.CenterHorizontally,
-                      modifier = Modifier.fillMaxWidth()
-                  ) {
-                      Row(
-                          verticalAlignment = Alignment.CenterVertically,
-                          horizontalArrangement = Arrangement.Center,
-                          modifier = Modifier.fillMaxWidth()
-                      ) {
-                          Box(
-                              modifier = Modifier
-                                  .size(36.dp)
-                                  .background(Color(0xFF0F172A), RoundedCornerShape(10.dp))
-                                  .border(1.dp, CyanAccent.copy(alpha = 0.4f), RoundedCornerShape(10.dp)),
-                              contentAlignment = Alignment.Center
-                          ) {
-                              Icon(
-                                  imageVector = if (isSignUpMode) Icons.Filled.Person else Icons.Filled.Lock,
-                                  contentDescription = null,
-                                  modifier = Modifier.size(16.dp),
-                                  tint = CyanAccent
-                              )
-                          }
-                          
-                          Spacer(modifier = Modifier.width(10.dp))
-                          
-                          Text(
-                              text = if (isSignUpMode) "Create Account" else "Sign In",
-                              color = Color.White,
-                              fontSize = 18.sp,
-                              fontWeight = FontWeight.Bold
-                          )
-                      }
-                      
-                      Spacer(modifier = Modifier.height(4.dp))
-                      
-                      Text(
-                          text = "Sync your progress, stats, and badges safely.",
-                          color = Color.LightGray.copy(alpha = 0.7f),
-                          fontSize = 11.sp,
-                          textAlign = TextAlign.Center
-                      )
-                      
-                      Spacer(modifier = Modifier.height(14.dp))
-
-                      Row(
-                          modifier = Modifier
-                              .fillMaxWidth()
-                              .height(38.dp)
-                              .background(Color(0xFF0F172A), RoundedCornerShape(24.dp))
-                              .padding(2.dp)
-                      ) {
-                          Button(
-                              onClick = { isSignUpMode = true },
-                              colors = ButtonDefaults.buttonColors(
-                                  containerColor = if (isSignUpMode) CyanAccent else Color.Transparent,
-                                  contentColor = if (isSignUpMode) Color.Black else Color.LightGray
-                              ),
-                              shape = RoundedCornerShape(24.dp),
-                              elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
-                              modifier = Modifier.weight(1f).fillMaxHeight(),
-                              contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
-                          ) {
-                              Text(text = "Register 📝", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                          }
-                          
-                          Button(
-                              onClick = { isSignUpMode = false },
-                              colors = ButtonDefaults.buttonColors(
-                                  containerColor = if (!isSignUpMode) CyanAccent else Color.Transparent,
-                                  contentColor = if (!isSignUpMode) Color.Black else Color.LightGray
-                              ),
-                              shape = RoundedCornerShape(24.dp),
-                              elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
-                              modifier = Modifier.weight(1f).fillMaxHeight(),
-                              contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
-                          ) {
-                              Text(text = "Sign In 🔑", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                          }
-                      }
-
-                      /*
-                 contentAlignment = Alignment.Center
-             ) {
-                  Column(
-                      horizontalAlignment = Alignment.CenterHorizontally,
-                      modifier = Modifier.fillMaxWidth()
-                 ) {
-                     Box(
-                         modifier = Modifier
-                             .size(60.dp)
-                             .background(Color(0xFF131D2D), RoundedCornerShape(16.dp))
-                             .border(1.2.dp, CyanAccent.copy(alpha = 0.5f), RoundedCornerShape(16.dp)),
-                         contentAlignment = Alignment.Center
-                     ) {
-                         Icon(
-                             imageVector = if (isSignUpMode) Icons.Filled.Person else Icons.Filled.Lock,
-                             contentDescription = null,
-                             modifier = Modifier.size(28.dp),
-                             tint = CyanAccent
-                         )
-                     }
-                     
-                     Spacer(modifier = Modifier.height(16.dp))
-                     
-                     Text(
-                         text = if (isSignUpMode) "Create Account" else "Sign In",
-                         color = Color.White,
-                         fontSize = 22.sp,
-                         fontWeight = FontWeight.ExtraBold
-                     )
-                     
-                     Spacer(modifier = Modifier.height(6.dp))
-                     
-                     Text(
-                         text = "Purity Tracker: Sign in to sync your progress, stats, and badges safely.",
-                         color = Color.LightGray.copy(alpha = 0.8f),
-                         fontSize = 12.sp,
-                         textAlign = TextAlign.Center,
-                         modifier = Modifier.padding(horizontal = 12.dp)
-                     )
-                     
-                     Spacer(modifier = Modifier.height(18.dp))
-
-                     Row(
-                         modifier = Modifier
-                             .fillMaxWidth(0.95f)
-                             .background(Color(0xFF131D2D), RoundedCornerShape(50.dp))
-                             .padding(4.dp)
-                     ) {
-                         Button(
-                             onClick = { isSignUpMode = true },
-                             colors = ButtonDefaults.buttonColors(
-                                 containerColor = if (isSignUpMode) CyanAccent else Color.Transparent,
-                                 contentColor = if (isSignUpMode) Color.Black else Color.LightGray
-                             ),
-                             shape = RoundedCornerShape(50.dp),
-                             elevation = if (isSignUpMode) ButtonDefaults.buttonElevation(defaultElevation = 2.dp) else ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
-                             modifier = Modifier.weight(1f),
-                             contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)
-                         ) {
-                             Text(text = "Register 📝", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                         }
-                         
-                         Button(
-                             onClick = { isSignUpMode = false },
-                             colors = ButtonDefaults.buttonColors(
-                                 containerColor = if (!isSignUpMode) CyanAccent else Color.Transparent,
-                                 contentColor = if (!isSignUpMode) Color.Black else Color.LightGray
-                             ),
-                             shape = RoundedCornerShape(50.dp),
-                             elevation = if (!isSignUpMode) ButtonDefaults.buttonElevation(defaultElevation = 2.dp) else ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
-                             modifier = Modifier.weight(1f),
-                             contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)
-                         ) {
-                             Text(text = "Sign In 🔑", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                         }
-                     }
-
-                     Spacer(modifier = Modifier.height(20.dp))
-
-                     */
-                     Spacer(modifier = Modifier.height(14.dp))
-                     Column(modifier = Modifier.fillMaxWidth()) {
-                         if (isSignUpMode) {
-                             androidx.compose.material3.OutlinedTextField(
-                                 value = name,
-                                 onValueChange = { name = it },
-                                 placeholder = { Text("Full Name", color = Color.LightGray.copy(alpha = 0.6f)) },
-                                 leadingIcon = { Icon(Icons.Filled.Person, contentDescription = null, tint = CyanAccent) },
-                                 colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                                     focusedTextColor = Color.White,
-                                     unfocusedTextColor = Color.White,
-                                     focusedPlaceholderColor = Color.LightGray,
-                                     unfocusedPlaceholderColor = Color.LightGray,
-                                     focusedBorderColor = CyanAccent,
-                                     unfocusedBorderColor = Color.White.copy(alpha = 0.2f),
-                                     focusedContainerColor = Color(0xFF131D2D).copy(alpha = 0.8f),
-                                     unfocusedContainerColor = Color(0xFF131D2D).copy(alpha = 0.5f),
-                                     errorContainerColor = Color.Transparent
-                                 ),
-                                 shape = RoundedCornerShape(16.dp),
-                                 modifier = Modifier.fillMaxWidth(),
-                                 singleLine = true
-                             )
-                             Spacer(modifier = Modifier.height(10.dp))
-                         }
-
-                         androidx.compose.material3.OutlinedTextField(
-                             value = email,
-                             onValueChange = { email = it },
-                             placeholder = { Text("Email Address", color = Color.LightGray.copy(alpha = 0.6f)) },
-                             leadingIcon = { Icon(Icons.Filled.Email, contentDescription = null, tint = CyanAccent) },
-                             colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                                 focusedTextColor = Color.White,
-                                 unfocusedTextColor = Color.White,
-                                 focusedPlaceholderColor = Color.LightGray,
-                                 unfocusedPlaceholderColor = Color.LightGray,
-                                 focusedBorderColor = CyanAccent,
-                                 unfocusedBorderColor = Color.White.copy(alpha = 0.2f),
-                                 focusedContainerColor = Color(0xFF131D2D).copy(alpha = 0.8f),
-                                 unfocusedContainerColor = Color(0xFF131D2D).copy(alpha = 0.5f),
-                                 errorContainerColor = Color.Transparent
-                             ),
-                             shape = RoundedCornerShape(16.dp),
-                             modifier = Modifier.fillMaxWidth(),
-                             singleLine = true
-                         )
-
-                         if (!isPasswordlessMode) {
-                             Spacer(modifier = Modifier.height(10.dp))
-                             androidx.compose.material3.OutlinedTextField(
-                                 value = password,
-                                 onValueChange = { password = it },
-                                 placeholder = { Text("Password", color = Color.LightGray.copy(alpha = 0.6f)) },
-                                 leadingIcon = { Icon(Icons.Filled.Lock, contentDescription = null, tint = CyanAccent) },
-                                 trailingIcon = {
-                                     val icon = if (isPasswordVisible) Icons.Filled.Visibility else Icons.Filled.VisibilityOff
-                                     IconButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
-                                         Icon(icon, contentDescription = null, tint = Color.LightGray)
-                                     }
-                                 },
-                                 visualTransformation = if (isPasswordVisible) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                                 colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                                     focusedTextColor = Color.White,
-                                     unfocusedTextColor = Color.White,
-                                     focusedPlaceholderColor = Color.LightGray,
-                                     unfocusedPlaceholderColor = Color.LightGray,
-                                     focusedBorderColor = CyanAccent,
-                                     unfocusedBorderColor = Color.White.copy(alpha = 0.2f),
-                                     focusedContainerColor = Color(0xFF131D2D).copy(alpha = 0.8f),
-                                     unfocusedContainerColor = Color(0xFF131D2D).copy(alpha = 0.5f),
-                                     errorContainerColor = Color.Transparent
-                                 ),
-                                 shape = RoundedCornerShape(16.dp),
-                                 modifier = Modifier.fillMaxWidth(),
-                                 singleLine = true
-                             )
-
-                             if (!isSignUpMode) {
-                                 Box(
-                                     modifier = Modifier.fillMaxWidth(),
-                                     contentAlignment = Alignment.CenterEnd
-                                 ) {
-                                     TextButton(
-                                         onClick = {
-                                             if (email.isBlank()) {
-                                                 android.widget.Toast.makeText(context, LanguageStore.get("enter_email_first"), android.widget.Toast.LENGTH_LONG).show()
-                                                 return@TextButton
-                                             }
-                                             isLoading = true
-                                             authViewModel.sendPasswordReset(email) { success, msg ->
-                                                 isLoading = false
-                                                 if (success) {
-                                                     android.widget.Toast.makeText(context, LanguageStore.get("reset_sent"), android.widget.Toast.LENGTH_LONG).show()
-                                                 } else {
-                                                     android.widget.Toast.makeText(context, msg ?: "Failed to send reset link", android.widget.Toast.LENGTH_LONG).show()
-                                                 }
-                                             }
-                                         },
-                                         contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
-                                     ) {
-                                         Text(
-                                             text = t("forgot_password"),
-                                             color = CyanAccent,
-                                             fontSize = 11.sp,
-                                             fontWeight = FontWeight.SemiBold
-                                         )
-                                     }
-                                 }
-                             }
-                         }
-                     }
-
-                     Spacer(modifier = Modifier.height(20.dp))
-
-                     if (isLoading) {
-                         CircularProgressIndicator(color = CyanAccent)
-                     } else {
-                         Button(
-                             onClick = {
-                                 if (email.isBlank()) {
-                                     android.widget.Toast.makeText(context, "Please enter your email", android.widget.Toast.LENGTH_SHORT).show()
-                                     return@Button
-                                 }
-                                 if (isPasswordlessMode) {
-                                     if (name.isBlank()) {
-                                         android.widget.Toast.makeText(context, "Please enter your name", android.widget.Toast.LENGTH_SHORT).show()
-                                         return@Button
-                                     }
-                                     isLoading = true
-                                     authViewModel.sendPasswordlessSignInLink(email, name) { success, msg ->
-                                         isLoading = false
-                                         if (success) {
-                                             android.widget.Toast.makeText(context, "Magic login link sent to your email! 📧 Please check your inbox.", android.widget.Toast.LENGTH_LONG).show()
-                                         } else {
-                                             android.widget.Toast.makeText(context, msg ?: "Failed to send link", android.widget.Toast.LENGTH_LONG).show()
-                                         }
-                                     }
-                                 } else {
-                                     if (password.length < 6) {
-                                         android.widget.Toast.makeText(context, "Password must be at least 6 characters", android.widget.Toast.LENGTH_SHORT).show()
-                                         return@Button
-                                     }
-                                     isLoading = true
-                                     if (isSignUpMode) {
-                                         if (name.isBlank()) {
-                                             android.widget.Toast.makeText(context, "Please enter your name", android.widget.Toast.LENGTH_SHORT).show()
-                                             isLoading = false
-                                             return@Button
-                                         }
-                                         authViewModel.signUpWithEmail(email, name, password, context) { success, msg ->
-                                             isLoading = false
-                                             if (!success) {
-                                                 android.widget.Toast.makeText(context, msg ?: "Signup failed", android.widget.Toast.LENGTH_SHORT).show()
-                                             }
-                                         }
-                                     } else {
-                                         authViewModel.signInWithEmail(email, password, context) { success, msg ->
-                                             isLoading = false
-                                             if (!success) {
-                                                 android.widget.Toast.makeText(context, msg ?: "Login failed", android.widget.Toast.LENGTH_SHORT).show()
-                                             }
-                                         }
-                                     }
-                                 }
-                             },
-                             colors = ButtonDefaults.buttonColors(containerColor = CyanAccent, contentColor = Color.Black),
-                             shape = RoundedCornerShape(16.dp),
-                             modifier = Modifier.fillMaxWidth(),
-                             contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 10.dp)
-                         ) {
-                             Text(
-                                 text = if (isPasswordlessMode) "Get Login Link" else if (isSignUpMode) "Register" else "Get Started",
-                                 color = Color.Black,
-                                 fontSize = 14.sp,
-                                 fontWeight = FontWeight.Bold
-                             )
-                         }
-                     }
-
-                     if (!isPasswordlessMode) {
-                         Spacer(modifier = Modifier.height(8.dp))
-                         TextButton(onClick = { isSignUpMode = !isSignUpMode }) {
-                             Text(
-                                 text = if (isSignUpMode) "Already have an account? Sign In" else "New here? Create Account",
-                                 color = CyanAccent,
-                                 fontSize = 12.sp,
-                                 fontWeight = FontWeight.SemiBold
-                             )
-                         }
-                     }
-
-                     Spacer(modifier = Modifier.height(18.dp))
-
-                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth(0.9f)) {
-                         Box(modifier = Modifier.height(1.dp).weight(1f).background(Color.White.copy(alpha = 0.15f)))
-                         Text(" OR ", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp), fontWeight = FontWeight.Bold)
-                         Box(modifier = Modifier.height(1.dp).weight(1f).background(Color.White.copy(alpha = 0.15f)))
-                     }
-
-                     Spacer(modifier = Modifier.height(14.dp))
-
-                     Button(
-                         onClick = { authViewModel.signInWithGoogle(context) },
-                         colors = ButtonDefaults.buttonColors(containerColor = Color.White),
-                         shape = RoundedCornerShape(16.dp),
-                         elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp),
-                         modifier = Modifier.fillMaxWidth(),
-                         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 10.dp)
-                     ) {
-                         Icon(
-                             painter = painterResource(id = R.drawable.ic_google),
-                             contentDescription = null,
-                             modifier = Modifier.size(20.dp),
-                             tint = Color.Unspecified
-                         )
-                         Spacer(modifier = Modifier.width(10.dp))
-                         Text("Log In with Google", color = Color(0xFF1E293B), fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                     }
-
-                     Spacer(modifier = Modifier.height(16.dp))
-                     Text("Developed by Anas", color = Color.LightGray.copy(alpha = 0.5f), fontSize = 11.sp, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
-                 }
-             }
+             ImprovedAuthScreen(
+                 authViewModel = authViewModel,
+                 userProfileViewModel = userProfileViewModel,
+                 purityTrackerViewModel = purityTrackerViewModel
+             )
          } else {
-             Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = CardBlue)) {
-                  Column(modifier = Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                       Icon(Icons.Filled.Person, contentDescription = null, tint = Color.LightGray, modifier = Modifier.size(64.dp))
-                       Spacer(modifier = Modifier.height(16.dp))
-                       Text("Welcome, ${currentUser?.displayName ?: "Warrior"}!", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                       Spacer(modifier = Modifier.height(8.dp))
-                       Text("Email: ${currentUser?.email}", color = Color.LightGray, fontSize = 14.sp)
-                       Spacer(modifier = Modifier.height(24.dp))
-                       Button(onClick = { authViewModel.signOut() }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)), modifier = Modifier.fillMaxWidth()) {
-                           Text("Log Out")
-                       }
-                       
-                       // Check if user is admin based on email
-                       if (currentUser?.email == "muhaiminulhasananas@gmail.com") {
-                           Spacer(modifier = Modifier.height(12.dp))
-                           Button(onClick = { onNavigateToStaticPage("admin_badges") }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)), modifier = Modifier.fillMaxWidth()) {
-                               Icon(Icons.Filled.AdminPanelSettings, contentDescription = null)
-                               Spacer(modifier = Modifier.width(8.dp))
-                               Text("Admin: Manage Badges")
-                            }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Button(onClick = { onNavigateToStaticPage("admin_payments") }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFD700)), modifier = Modifier.fillMaxWidth()) {
-                                Icon(Icons.Filled.Payment, contentDescription = null, tint = Color.Black)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Admin: Payment Approvals (৳)", color = Color.Black, fontWeight = FontWeight.Bold)
-                           }
-                       }
-                  }
+             val userProfile by userProfileViewModel.userProfile.collectAsState()
+             if (userProfile == null || userProfile?.username.isNullOrEmpty()) {
+                 ProfileSetupScreen(userProfileViewModel = userProfileViewModel) {
+                     userProfileViewModel.fetchProfile(currentUser!!.uid)
+                 }
+             } else {
+                 UserProfileContent(
+                     userProfile = userProfile!!,
+                     authViewModel = authViewModel,
+                     purityTrackerViewModel = purityTrackerViewModel,
+                     socialViewModel = socialViewModel,
+                     userProfileViewModel = userProfileViewModel,
+                     isPremiumUserState = isPremiumUserState,
+                     onNavigateToStaticPage = onNavigateToStaticPage,
+                     onOpenFriendsList = { activeView = "friends" }
+                 )
              }
          }
 
@@ -4365,15 +4500,18 @@ fun HomeScreen(
     viewModel: PurityTrackerViewModel = viewModel(),
     badgesViewModel: BadgesViewModel = viewModel(),
     communityViewModel: CommunityViewModel = viewModel(),
+    authViewModel: AuthViewModel = viewModel(),
     onNavigateToPremium: (() -> Unit)? = null
 ) {
     val durationMs by viewModel.durationMs.collectAsState()
     val dynamicBadges by badgesViewModel.badges.collectAsState()
     
-    // Sync streak when it changes periodically (every time recomposed with new days is too frequent, so use a simple LaunchedEffect on Days change)
     val days = TimeUnit.MILLISECONDS.toDays(durationMs).toInt()
-    LaunchedEffect(days) {
-        communityViewModel.syncUserStreak(durationMs)
+    val currentBadge = dynamicBadges.lastOrNull { days >= it.requiredDays } ?: dynamicBadges.firstOrNull() ?: CustomBadge("", "None", 0, "None")
+
+    // Sync streak when it changes periodically (every time recomposed with new days is too frequent, so use a simple LaunchedEffect on Days change)
+    LaunchedEffect(days, currentBadge.name, currentBadge.imageUrl) {
+        communityViewModel.syncUserStreak(durationMs, currentBadge.name, currentBadge.imageUrl)
     }
     
     var showBadgesMenu by remember { mutableStateOf(false) }
@@ -4384,7 +4522,6 @@ fun HomeScreen(
     val mins = TimeUnit.MILLISECONDS.toMinutes(durationMs) % 60
     val secs = TimeUnit.MILLISECONDS.toSeconds(durationMs) % 60
 
-    val currentBadge = dynamicBadges.lastOrNull { days >= it.requiredDays } ?: dynamicBadges.firstOrNull() ?: CustomBadge("", "None", 0, "None")
     val nextBadge = dynamicBadges.firstOrNull { days < it.requiredDays }
 
     val nextDaysReq = nextBadge?.requiredDays ?: 365
@@ -4425,6 +4562,7 @@ fun HomeScreen(
 
     val scrollState = rememberScrollState()
     val isPremiumUser by PremiumManager.isPremium.collectAsState()
+    val currentUser by authViewModel.currentUser.collectAsState()
 
     Column(
         modifier = Modifier
@@ -4434,7 +4572,35 @@ fun HomeScreen(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
-            Text(t("welcome_warrior"), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val welcomeText = t("welcome_warrior")
+                if (welcomeText.contains(",")) {
+                    val split = welcomeText.split(",", limit = 2)
+                    Text(split[0] + ", ", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    
+                    val uName = currentUser?.displayName?.takeIf { it.isNotBlank() } ?: split[1].trim()
+                    val cMail = currentUser?.email ?: ""
+                    val isCurrentPremium = isPremiumUser || cMail == "muhaiminulhasananas@gmail.com"
+                    
+                    PremiumNameText(
+                        name = uName,
+                        isPremium = isCurrentPremium,
+                        defaultColor = Color.White,
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (isCurrentPremium) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        ProBlueBadge(size = 20.dp)
+                    }
+                    if (cMail == "muhaiminulhasananas@gmail.com") {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Icon(Icons.Filled.Verified, contentDescription = "Admin", tint = CyanAccent, modifier = Modifier.size(20.dp))
+                    }
+                } else {
+                    Text(welcomeText, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                }
+            }
             Spacer(modifier = Modifier.height(4.dp))
             Text(t("quote_desc"), fontSize = 14.sp, color = Color.LightGray)
         }
@@ -4550,10 +4716,12 @@ fun HomeScreen(
 
         // Main Timer Card
         Card(
-            colors = CardDefaults.cardColors(containerColor = CardBlue),
+            colors = CardDefaults.cardColors(containerColor = Color.Transparent),
             shape = RoundedCornerShape(20.dp),
-            modifier = Modifier.fillMaxWidth(),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .glassCard(cornerSize = 20.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
         ) {
             Column(
                 modifier = Modifier
@@ -4628,18 +4796,9 @@ fun HomeScreen(
                 Text(currentBadge.name, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
                 Spacer(modifier = Modifier.height(8.dp))
                 
-                Box(contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier.size(100.dp),
-                        color = Color.White,
-                        trackColor = Color(0xFF374151),
-                        strokeWidth = 4.dp
-                    )
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(String.format("%02d", days), fontSize = 36.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                        Text(t("days"), fontSize = 10.sp, color = Color.LightGray)
-                    }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(String.format("%02d", days), fontSize = 48.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(t("days").uppercase(), fontSize = 12.sp, color = CyanAccent, letterSpacing = 2.sp, fontWeight = FontWeight.Bold)
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
@@ -4661,15 +4820,16 @@ fun HomeScreen(
                         .padding(horizontal = 24.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
+                    val context = LocalContext.current
                     Button(
-                        onClick = { },
+                        onClick = { context.sendBroadcast(android.content.Intent("com.example.MOTIVATION")) },
                         colors = ButtonDefaults.buttonColors(containerColor = RedAlert),
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(8.dp)
                     ) {
-                        Icon(Icons.Filled.Menu, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Filled.MedicalServices, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(t("stop_timer"))
+                        Text(if (LanguageStore.currentLanguage.value == "bn") "উপদেশ" else "Emergency")
                     }
                     Button(
                         onClick = { showResetDialog = true },
@@ -4941,6 +5101,37 @@ fun HomeScreen(
         
         Spacer(modifier = Modifier.height(16.dp))
 
+        // Private DNS Feature
+        SettingCard(
+            title = if (LanguageStore.currentLanguage.value == "bn") "প্রাইভেট DNS" else "Private DNS",
+            desc = if (LanguageStore.currentLanguage.value == "bn") "Family Adguard DNS কপি করে ফোনে সেভ করুন" else "Copy Family Adguard DNS and save to settings",
+            buttonText = if (LanguageStore.currentLanguage.value == "bn") "কপি করুন ও সেটিং খুলুন" else "Copy & Open Settings",
+            isOn = true,
+            isWarning = false,
+            icon = Icons.Filled.Security,
+            onClick = {
+                val dnsText = "family.adguard-dns.com"
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("Private DNS", dnsText)
+                clipboard.setPrimaryClip(clip)
+                android.widget.Toast.makeText(context, "Copied: $dnsText", android.widget.Toast.LENGTH_LONG).show()
+
+                try {
+                    val intent = Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS)
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    try {
+                        val intent = Intent(android.provider.Settings.ACTION_SETTINGS)
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(intent)
+                    } catch (e2: Exception) {}
+                }
+            }
+        )
+        
+        Spacer(modifier = Modifier.height(16.dp))
+
         // Settings Guard Card
         var isAccessibilityEnabled by remember { mutableStateOf(false) }
 
@@ -4965,10 +5156,6 @@ fun HomeScreen(
             isWarning = !isAccessibilityEnabled,
             icon = Icons.Filled.Lock,
             onClick = {
-                if (!vpnServiceRunning) {
-                    android.widget.Toast.makeText(context, LanguageStore.get("error_enable_vpn"), android.widget.Toast.LENGTH_SHORT).show()
-                    return@SettingCard
-                }
                 if (!isAccessibilityEnabled) {
                     try {
                         val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
@@ -5011,9 +5198,12 @@ fun SettingCard(
     onClick: (() -> Unit)? = null
 ) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = CardBlue),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
         shape = RoundedCornerShape(12.dp),
-        modifier = Modifier.fillMaxWidth().clickable(enabled = onClick != null) { onClick?.invoke() }
+        modifier = Modifier
+            .fillMaxWidth()
+            .glassCard(cornerSize = 12.dp)
+            .clickable(enabled = onClick != null) { onClick?.invoke() }
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
@@ -5273,19 +5463,26 @@ fun DatePickerDialogMock(onDismiss: () -> Unit, onDateSelected: (Int, Int, Int) 
         dismissButton = {
             TextButton(onClick = onDismiss) { Text(t("cancel"), color = Color.LightGray) }
         },
-        colors = DatePickerDefaults.colors(containerColor = CardBlue)
+        colors = DatePickerDefaults.colors(containerColor = Color(0xFF0F172A))
     ) {
         DatePicker(
             state = datePickerState,
             colors = DatePickerDefaults.colors(
-                containerColor = CardBlue,
+                containerColor = Color(0xFF0F172A),
                 titleContentColor = Color.White,
                 headlineContentColor = Color.White,
                 weekdayContentColor = Color.LightGray,
                 dayContentColor = Color.White,
                 selectedDayContainerColor = CyanAccent,
                 todayDateBorderColor = CyanAccent,
-                todayContentColor = CyanAccent
+                todayContentColor = CyanAccent,
+                yearContentColor = Color.White,
+                currentYearContentColor = CyanAccent,
+                selectedYearContentColor = Color.Black,
+                selectedYearContainerColor = CyanAccent,
+                subheadContentColor = Color.White,
+                dayInSelectionRangeContainerColor = Color(0x3306B6D4),
+                dayInSelectionRangeContentColor = Color.White
             )
         )
     }

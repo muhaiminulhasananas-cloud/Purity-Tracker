@@ -212,5 +212,6 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     fun signOut() {
         auth.signOut()
         _currentUser.value = null
+        PremiumManager.setPremiumStatus(getApplication(), false)
     }
 }

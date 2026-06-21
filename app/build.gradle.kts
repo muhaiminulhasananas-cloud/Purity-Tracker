@@ -1,3 +1,5 @@
+import java.io.File
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.google.services)
@@ -16,8 +18,8 @@ android {
     applicationId = "com.aistudio.puritytracker.abcxyz"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 15
+    versionName = "1.1.5"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -85,6 +87,7 @@ dependencies {
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
   implementation(libs.androidx.compose.material3)
+  implementation("androidx.compose.material:material:1.6.0")
   implementation(libs.androidx.compose.ui)
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
@@ -111,6 +114,8 @@ dependencies {
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
   implementation(libs.play.services.location)
+  implementation(libs.play.services.ads)
+  implementation(libs.canhub.image.cropper)
   implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
@@ -131,3 +136,39 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }
+
+tasks.register("copyApks") {
+    doNotTrackState("Just simple copying")
+    val appDir = project.projectDir
+    val rootDir = project.rootDir
+    doLast {
+        val localApk = File(appDir, "build/outputs/apk/debug/app-debug.apk")
+        val platformApk = File(rootDir, ".build-outputs/app-debug.apk")
+        
+        val target1 = File(rootDir, "PurityTracker.apk")
+        val target2 = File(rootDir, "PurityTracker_Glass.apk")
+        val target3 = File(rootDir, "App-Download-Here.apk")
+        
+        if (localApk.exists()) {
+            localApk.copyTo(target1, overwrite = true)
+            localApk.copyTo(target2, overwrite = true)
+            localApk.copyTo(target3, overwrite = true)
+            println("APK files successfully copied from local build path!")
+        } else if (platformApk.exists()) {
+            platformApk.copyTo(target1, overwrite = true)
+            platformApk.copyTo(target2, overwrite = true)
+            platformApk.copyTo(target3, overwrite = true)
+            println("APK files successfully copied from platform build output (.build-outputs)!")
+        } else {
+            println("Source APK not found at standard path")
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "assembleDebug") {
+        finalizedBy("copyApks")
+    }
+}
+
+
