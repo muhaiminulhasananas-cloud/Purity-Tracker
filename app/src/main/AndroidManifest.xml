@@ -138,14 +138,11 @@
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:directBootAware="true"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:stopWithTask="false">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
             <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_service_config" />
-            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Settings Guard Accessibility Service for 24/7 protection against bypasses and uninstallation." />
         </service>
 
         <service android:name=".SettingsGuardWatchdogService"
@@ -177,7 +174,6 @@
                 <action android:name="android.intent.action.TIME_SET" />
                 <action android:name="android.intent.action.DATE_CHANGED" />
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
-                <action android:name="com.example.ACTION_RESTART_WATCHDOG" />
             </intent-filter>
         </receiver>
 

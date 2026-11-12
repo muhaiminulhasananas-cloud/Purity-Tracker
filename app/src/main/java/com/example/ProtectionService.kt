@@ -68,9 +68,9 @@ class ProtectionService : AccessibilityService() {
             try {
                 val svc = instance
                 if (svc != null) {
-                    svc.isServiceRunningFlag()
-                    svc.ensureServiceConfigAndForeground()
-                    svc.ensureHighSpeedPatrolRunning()
+                    svc.recordAliveHeartbeat()
+                    svc.ensureServiceConfig()
+                    svc.ensureBackupPatrolRunning()
                 }
             } catch (e: Exception) {}
         }
@@ -82,80 +82,68 @@ class ProtectionService : AccessibilityService() {
     private var lastBlockElapsedTime: Long = 0L
     private var lastPatrolPackagesettings: Boolean = false
 
-    private val delayedScan45 = Runnable { performFullActiveWindowScan(null) }
-    private val delayedScan110 = Runnable { performFullActiveWindowScan(null) }
-    private val delayedScan220 = Runnable { performFullActiveWindowScan(null) }
-    private val delayedScan380 = Runnable { performFullActiveWindowScan(null) }
-
-    // Continuous 5-second self-healing watchdog
+    // 5-second heartbeat updater while service is alive
     private val watchdogRunnable = object : Runnable {
         override fun run() {
             try {
-                isServiceRunning = true
-                lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
-                ensureServiceConfigAndForeground()
+                recordAliveHeartbeat()
+                ensureServiceConfig()
                 checkAndStartVpnIfNeeded()
-                ensureHighSpeedPatrolRunning()
+                ensureBackupPatrolRunning()
             } catch (e: Exception) {}
             mainHandler.postDelayed(this, 5000L)
         }
     }
 
-    // Continuous High-Speed 85ms Active Window Patrol while screen is ON
-    private val highSpeedPatrolRunnable = object : Runnable {
+    // Slow 1000ms backup safety patrol ONLY while screen is ON (primary trigger is onAccessibilityEvent)
+    private val backupPatrolRunnable = object : Runnable {
         override fun run() {
-            var nextDelayMs = 220L
             try {
-                isServiceRunning = true
-                lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+                recordAliveHeartbeat()
                 val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
                 val isScreenOn = pm?.isInteractive ?: true
                 if (isScreenOn) {
-                    val matchedSettingsOrSystem = performFullActiveWindowScan(null)
-                    nextDelayMs = if (matchedSettingsOrSystem || lastPatrolPackagesettings) 85L else 220L
-                } else {
-                    nextDelayMs = 1200L
+                    performFullActiveWindowScan(null)
                 }
             } catch (e: Exception) {}
-            mainHandler.postDelayed(this, nextDelayMs)
+            mainHandler.postDelayed(this, 1000L)
         }
     }
 
-    private fun isServiceRunningFlag() {
+    private fun recordAliveHeartbeat() {
+        val nowElapsed = SystemClock.elapsedRealtime()
         isServiceRunning = true
-        lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+        lastActiveElapsedRealtime = nowElapsed
+        AntiUninstallManager.recordServiceHeartbeat(this, nowElapsed)
+        GuardHealthWorker.cancelHealthAlertNotification(this)
     }
 
     override fun onCreate() {
         super.onCreate()
         instance = this
-        isServiceRunning = true
-        lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
-        ensureServiceConfigAndForeground()
+        recordAliveHeartbeat()
+        ensureServiceConfig()
         registerScreenReceiver()
-        ensureHighSpeedPatrolRunning()
+        GuardHealthWorker.schedulePeriodicWork(this)
+        ensureBackupPatrolRunning()
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        isServiceRunning = true
-        lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+        recordAliveHeartbeat()
 
-        ensureServiceConfigAndForeground()
+        ensureServiceConfig()
         registerScreenReceiver()
-        try {
-            SettingsGuardWatchdogService.start(this)
-            SettingsGuardJobService.schedule(this)
-        } catch (e: Exception) {}
+        GuardHealthWorker.schedulePeriodicWork(this)
 
         mainHandler.removeCallbacks(watchdogRunnable)
         mainHandler.post(watchdogRunnable)
-        ensureHighSpeedPatrolRunning()
+        ensureBackupPatrolRunning()
         checkAndStartVpnIfNeeded()
     }
 
-    private fun ensureServiceConfigAndForeground() {
+    private fun ensureServiceConfig() {
         try {
             val info = serviceInfo ?: AccessibilityServiceInfo()
             info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
@@ -168,13 +156,12 @@ class ProtectionService : AccessibilityService() {
                     AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
             serviceInfo = info
         } catch (e: Exception) {}
-
-        SettingsGuardWatchdogService.promoteServiceToForeground(this)
+        // NOTE: Do NOT call startForeground() on ProtectionService; let Android manage AccessibilityService binding.
     }
 
-    private fun ensureHighSpeedPatrolRunning() {
-        mainHandler.removeCallbacks(highSpeedPatrolRunnable)
-        mainHandler.post(highSpeedPatrolRunnable)
+    private fun ensureBackupPatrolRunning() {
+        mainHandler.removeCallbacks(backupPatrolRunnable)
+        mainHandler.post(backupPatrolRunnable)
     }
 
     private fun checkAndStartVpnIfNeeded() {
@@ -226,8 +213,9 @@ class ProtectionService : AccessibilityService() {
                             action == "android.intent.action.PHONE_STATE" ||
                             action == Intent.ACTION_BOOT_COMPLETED
                         ) {
-                            ensureServiceConfigAndForeground()
-                            ensureHighSpeedPatrolRunning()
+                            recordAliveHeartbeat()
+                            ensureServiceConfig()
+                            ensureBackupPatrolRunning()
                             checkAndStartVpnIfNeeded()
                         }
                     }
@@ -261,8 +249,10 @@ class ProtectionService : AccessibilityService() {
                 screenReceiver = null
             }
             mainHandler.removeCallbacksAndMessages(null)
-            SettingsGuardWatchdogService.start(this)
-            SettingsGuardJobService.schedule(this)
+            // Do NOT call startForegroundService from onUnbind (blocked on Android 12+).
+            // Instead, run GuardHealthWorker check so the user is notified if the guard stays dead.
+            GuardHealthWorker.schedulePeriodicWork(this)
+            GuardHealthWorker.checkNowAndNotify(this)
         } catch (e: Exception) {}
         return true
     }
@@ -270,14 +260,13 @@ class ProtectionService : AccessibilityService() {
     override fun onRebind(intent: Intent?) {
         super.onRebind(intent)
         instance = this
-        isServiceRunning = true
-        lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
-        ensureServiceConfigAndForeground()
+        recordAliveHeartbeat()
+        ensureServiceConfig()
         checkAndStartVpnIfNeeded()
         registerScreenReceiver()
         mainHandler.removeCallbacks(watchdogRunnable)
         mainHandler.post(watchdogRunnable)
-        ensureHighSpeedPatrolRunning()
+        ensureBackupPatrolRunning()
     }
 
     override fun onDestroy() {
@@ -289,33 +278,23 @@ class ProtectionService : AccessibilityService() {
                 screenReceiver = null
             }
             mainHandler.removeCallbacksAndMessages(null)
-            SettingsGuardWatchdogService.start(this)
-            SettingsGuardJobService.schedule(this)
+            // Do NOT call startForegroundService from onDestroy (blocked on Android 12+).
+            GuardHealthWorker.schedulePeriodicWork(this)
+            GuardHealthWorker.checkNowAndNotify(this)
         } catch (e: Exception) {}
         super.onDestroy()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        isServiceRunning = true
-        lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+        recordAliveHeartbeat()
         try {
             val eventPkg = event.packageName?.toString() ?: ""
             if (eventPkg == this.packageName) {
                 return
             }
 
-            // Immediate 0ms scan
+            // Event-driven primary scan (no multi-stage +45/+110/+220/+380ms scan storm)
             performFullActiveWindowScan(event)
-
-            // Multi-stage follow-up scans to catch animations, fragments, and popup dialogs on the exact millisecond they render
-            mainHandler.removeCallbacks(delayedScan45)
-            mainHandler.removeCallbacks(delayedScan110)
-            mainHandler.removeCallbacks(delayedScan220)
-            mainHandler.removeCallbacks(delayedScan380)
-            mainHandler.postDelayed(delayedScan45, 45L)
-            mainHandler.postDelayed(delayedScan110, 110L)
-            mainHandler.postDelayed(delayedScan220, 220L)
-            mainHandler.postDelayed(delayedScan380, 380L)
         } catch (t: Throwable) {
             // Never crash onAccessibilityEvent
         }

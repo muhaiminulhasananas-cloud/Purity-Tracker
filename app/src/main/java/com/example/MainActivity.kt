@@ -1675,39 +1675,31 @@ class MainActivity : ComponentActivity() {
             
             try {
                 val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
-                nm?.cancel(1009)
                 nm?.cancel(1012)
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                     nm?.deleteNotificationChannel("protection_guard_service_channel")
-                    nm?.deleteNotificationChannel("settings_guard_watchdog_channel")
                     nm?.deleteNotificationChannel("vpn_active_guard")
                 }
             } catch (e: Exception) {}
 
             try {
-                getSharedPreferences("ProtectionPrefs", Context.MODE_PRIVATE)
-                    .edit()
-                    .putBoolean("auto_start_enabled", true)
-                    .apply()
                 startService(Intent(this@MainActivity, BackgroundNotificationService::class.java))
-                SettingsGuardWatchdogService.start(this@MainActivity)
+                GuardHealthWorker.schedulePeriodicWork(this@MainActivity)
+                SettingsGuardWatchdogService.startIfInForeground(this@MainActivity)
                 SettingsGuardJobService.schedule(this@MainActivity)
                 ProtectionService.pokeFromWatchdog(this@MainActivity)
+                GuardHealthWorker.checkNowAndNotify(this@MainActivity)
             } catch(e: Exception) {}
             
             fetchLocationAndSchedule()
         }
 
-        // Automatically request unrestricted background/foreground/auto-launch battery mode on install/open
+        // Remove the one-time battery_prompt_shown_v2 gate:
+        // Always check the real PowerManager.isIgnoringBatteryOptimizations() status on app start.
         window.decorView.post {
             try {
-                if (!AntiUninstallManager.isSystemBatteryOptimizationIgnored(this@MainActivity)) {
-                    val bPrefs = getSharedPreferences("ProtectionPrefs", Context.MODE_PRIVATE)
-                    if (!bPrefs.getBoolean("battery_prompt_shown_v2", false)) {
-                        bPrefs.edit().putBoolean("battery_prompt_shown_v2", true).apply()
-                        AntiUninstallManager.requestIgnoreBatteryOptimization(this@MainActivity)
-                    }
-                }
+                GuardHealthWorker.schedulePeriodicWork(this@MainActivity)
+                GuardHealthWorker.checkNowAndNotify(this@MainActivity)
             } catch (e: Exception) {}
         }
         
@@ -8309,37 +8301,72 @@ fun ProfileScreen(
 
          Spacer(modifier = Modifier.height(14.dp))
 
-         // Compact 2-Column Unified Protection Grid Card in Account/Settings (Polled on IO thread for 120Hz smoothness)
+         // Live Protection Status in Account/Settings (Polled on IO thread using real liveness + real PowerManager)
          var hasPinProfile by remember { mutableStateOf(LockManager.hasPin(context)) }
-         var isGuardConnectedProfile by remember { mutableStateOf(false) }
+         var isGuardAliveProfile by remember { mutableStateOf(false) }
+         var isGuardDeadButEnabledProfile by remember { mutableStateOf(false) }
          var isBatteryIgnoredProfile by remember { mutableStateOf(false) }
          var isDeviceAdminProfile by remember { mutableStateOf(false) }
          var isVpnActiveProfile by remember { mutableStateOf(false) }
+         var isOemAutoStartVisitedProfile by remember { mutableStateOf(false) }
+         var isRecentsLockedProfile by remember { mutableStateOf(false) }
 
          LaunchedEffect(Unit) {
              while (true) {
                  val status = withContext(Dispatchers.IO) {
                      val pin = LockManager.hasPin(context)
-                     val guard = AntiUninstallManager.isAccessibilityServiceActive(context) || AntiUninstallManager.isAccessibilityServiceConnected(context)
+                     val guardAlive = AntiUninstallManager.isAccessibilityServiceAlive(context)
+                     val guardDead = AntiUninstallManager.isAccessibilityDeadButEnabled(context)
                      val battery = AntiUninstallManager.isBatteryOptimizationIgnored(context)
                      val admin = AntiUninstallManager.isDeviceAdminActive(context)
                      val vpn = LocalDnsVpnService.isVpnInterfaceUp()
-                     listOf(pin, guard, battery, admin, vpn)
+                     val oemVisited = AntiUninstallManager.isOemAutoStartVisited(context)
+                     val recentsLocked = AntiUninstallManager.isRecentsLockConfirmed(context)
+                     GuardHealthWorker.checkNowAndNotify(context)
+                     listOf(pin, guardAlive, guardDead, battery, admin, vpn, oemVisited, recentsLocked)
                  }
                  hasPinProfile = status[0]
-                 isGuardConnectedProfile = status[1]
-                 isBatteryIgnoredProfile = status[2]
-                 isDeviceAdminProfile = status[3]
-                 isVpnActiveProfile = status[4]
-                 kotlinx.coroutines.delay(2500)
+                 isGuardAliveProfile = status[1]
+                 isGuardDeadButEnabledProfile = status[2]
+                 isBatteryIgnoredProfile = status[3]
+                 isDeviceAdminProfile = status[4]
+                 isVpnActiveProfile = status[5]
+                 isOemAutoStartVisitedProfile = status[6]
+                 isRecentsLockedProfile = status[7]
+                 kotlinx.coroutines.delay(1500)
              }
          }
+
+         ProtectionLiveStatusCard(
+             isGuardAlive = isGuardAliveProfile,
+             isGuardDeadButEnabled = isGuardDeadButEnabledProfile,
+             isBatteryOptimizationIgnored = isBatteryIgnoredProfile,
+             isOemAutoStartConfigured = isOemAutoStartVisitedProfile,
+             isRecentsLockConfirmed = isRecentsLockedProfile,
+             onFixAccessibility = {
+                 AntiUninstallManager.requestAccessibilityService(context)
+             },
+             onFixBatteryOptimization = {
+                 AntiUninstallManager.requestIgnoreBatteryOptimization(context)
+             },
+             onFixOemAutoStart = {
+                 AntiUninstallManager.openOemAutoStartSettings(context)
+                 isOemAutoStartVisitedProfile = true
+             },
+             onConfirmRecentsLock = {
+                 AntiUninstallManager.markRecentsLockConfirmed(context, true)
+                 isRecentsLockedProfile = true
+             }
+         )
+
+         Spacer(modifier = Modifier.height(12.dp))
 
          UnifiedProtectionCard(
              hasPin = hasPinProfile,
              isDnsActive = true,
              isVpnActive = isVpnActiveProfile,
-             isGuardActive = isGuardConnectedProfile,
+             isGuardActive = isGuardAliveProfile,
+             isGuardDeadButEnabled = isGuardDeadButEnabledProfile,
              isBatteryExempt = isBatteryIgnoredProfile,
              isAdminActive = isDeviceAdminProfile,
              onPinClick = {
@@ -8389,14 +8416,21 @@ fun ProfileScreen(
                  }
              },
              onGuardClick = {
-                 if (isGuardConnectedProfile) {
+                 if (isGuardAliveProfile) {
                      android.widget.Toast.makeText(
                          context,
-                         if (LanguageStore.currentLanguage.value == "bn") "🛡️ সেটিংস গার্ড সক্রিয় ও স্থায়ীভাবে লক করা আছে!" else "🛡️ Settings Guard is active and permanently locked!",
+                         if (LanguageStore.currentLanguage.value == "bn") "🛡️ সেটিংস গার্ড সক্রিয় (Alive) ও সুরক্ষিত আছে!" else "🛡️ Settings Guard is Alive and actively protecting!",
                          android.widget.Toast.LENGTH_SHORT
                      ).show()
+                 } else if (isGuardDeadButEnabledProfile) {
+                     AntiUninstallManager.requestAccessibilityService(context)
+                     android.widget.Toast.makeText(
+                         context,
+                         if (LanguageStore.currentLanguage.value == "bn") "⚠️ সিস্টেম গার্ড থামিয়ে দিয়েছে! Purity Tracker একবার OFF করে আবার ON করুন।" else "⚠️ System stopped the guard! Toggle Purity Tracker OFF and ON again.",
+                         android.widget.Toast.LENGTH_LONG
+                     ).show()
                  } else {
-                     SettingsGuardWatchdogService.start(context)
+                     SettingsGuardWatchdogService.startIfInForeground(context)
                      AntiUninstallManager.requestAccessibilityService(context)
                      android.widget.Toast.makeText(
                          context,
@@ -8407,17 +8441,11 @@ fun ProfileScreen(
              },
              onBatteryClick = {
                  try {
-                     if (!AntiUninstallManager.isSystemBatteryOptimizationIgnored(context)) {
+                     if (!AntiUninstallManager.isBatteryOptimizationIgnored(context)) {
                          AntiUninstallManager.requestIgnoreBatteryOptimization(context)
                      } else {
-                         AntiUninstallManager.openAutoStartSettings(context)
-                         android.widget.Toast.makeText(
-                             context,
-                             if (LanguageStore.currentLanguage.value == "bn") "⚡ ফোরগ্রাউন্ড, ব্যাকগ্রাউন্ড ও অটো-লঞ্চ সুরক্ষা সক্রিয় আছে।" else "⚡ Foreground, Background & Auto-launch protection is active.",
-                             android.widget.Toast.LENGTH_SHORT
-                         ).show()
+                         AntiUninstallManager.openOemAutoStartSettings(context)
                      }
-                     isBatteryIgnoredProfile = true
                  } catch (e: Exception) {}
              },
              onAdminClick = {
@@ -9059,8 +9087,15 @@ fun HomeScreen(
         var vpnServiceRunning by remember { mutableStateOf(false) }
         var isAccessibilityEnabled by remember { mutableStateOf(false) }
         var isAccessibilityServiceRunning by remember { mutableStateOf(false) }
+        var isAccessibilityDeadButEnabled by remember { mutableStateOf(false) }
         var isDeviceAdminEnabled by remember { mutableStateOf(false) }
-        var isBatteryExempt by remember { mutableStateOf(false) }
+        var isBatteryExempt by remember { mutableStateOf(AntiUninstallManager.isBatteryOptimizationIgnored(context)) }
+        var isOemAutoStartVisited by remember { mutableStateOf(AntiUninstallManager.isOemAutoStartVisited(context)) }
+        var isRecentsLockConfirmed by remember { mutableStateOf(AntiUninstallManager.isRecentsLockConfirmed(context)) }
+        // Show explanatory dialog on EVERY app start when battery optimization is NOT ignored (never gated by a one-time flag)
+        var showBatteryExemptionDialog by remember {
+            mutableStateOf(!AntiUninstallManager.isBatteryOptimizationIgnored(context))
+        }
         var showPinDialog by remember { mutableStateOf(false) }
         var showPinLockedInfoDialog by remember { mutableStateOf(false) }
         var showGuardianKeyCreatedDialog by remember { mutableStateOf(false) }
@@ -9081,10 +9116,13 @@ fun HomeScreen(
                     scope.launch(Dispatchers.IO) {
                         val pin = LockManager.hasPin(context)
                         val gKey = if (pin) LockManager.getGuardianKey(context) else ""
-                        val accEnabled = AntiUninstallManager.isAccessibilityServiceActive(context)
-                        val accRunning = AntiUninstallManager.isAccessibilityServiceConnected(context)
+                        val accAlive = AntiUninstallManager.isAccessibilityServiceAlive(context)
+                        val accDead = AntiUninstallManager.isAccessibilityDeadButEnabled(context)
                         val devAdmin = AntiUninstallManager.isDeviceAdminActive(context)
                         val batExempt = AntiUninstallManager.isBatteryOptimizationIgnored(context)
+                        val oemVisited = AntiUninstallManager.isOemAutoStartVisited(context)
+                        val recentsLocked = AntiUninstallManager.isRecentsLockConfirmed(context)
+                        GuardHealthWorker.checkNowAndNotify(context)
                         val preferRunning = vpnPrefs.getBoolean("vpn_is_running", false)
                         var vpnUp = LocalDnsVpnService.isVpnInterfaceUp()
                         if (preferRunning && !vpnUp) {
@@ -9099,10 +9137,16 @@ fun HomeScreen(
                         withContext(Dispatchers.Main) {
                             hasPin = pin
                             if (pin) activeGuardianKey = gKey
-                            isAccessibilityEnabled = accEnabled
-                            isAccessibilityServiceRunning = accRunning
+                            isAccessibilityEnabled = accAlive
+                            isAccessibilityServiceRunning = accAlive
+                            isAccessibilityDeadButEnabled = accDead
                             isDeviceAdminEnabled = devAdmin
                             isBatteryExempt = batExempt
+                            isOemAutoStartVisited = oemVisited
+                            isRecentsLockConfirmed = recentsLocked
+                            if (batExempt) {
+                                showBatteryExemptionDialog = false
+                            }
                             vpnServiceRunning = vpnUp
                         }
                     }
@@ -10567,19 +10611,135 @@ fun HomeScreen(
                 }
                 vpnServiceRunning = LocalDnsVpnService.isVpnInterfaceUp()
                 try {
-                    SettingsGuardWatchdogService.start(context)
+                    SettingsGuardWatchdogService.startIfInForeground(context)
                 } catch (e: Exception) {}
                 hasPin = LockManager.hasPin(context)
-                isAccessibilityEnabled = AntiUninstallManager.isAccessibilityServiceActive(context)
-                isAccessibilityServiceRunning = AntiUninstallManager.isAccessibilityServiceConnected(context)
+                val aliveNow = AntiUninstallManager.isAccessibilityServiceAlive(context)
+                val deadNow = AntiUninstallManager.isAccessibilityDeadButEnabled(context)
+                isAccessibilityEnabled = aliveNow
+                isAccessibilityServiceRunning = aliveNow
+                isAccessibilityDeadButEnabled = deadNow
                 isDeviceAdminEnabled = AntiUninstallManager.isDeviceAdminActive(context)
                 isBatteryExempt = AntiUninstallManager.isBatteryOptimizationIgnored(context)
+                isOemAutoStartVisited = AntiUninstallManager.isOemAutoStartVisited(context)
+                isRecentsLockConfirmed = AntiUninstallManager.isRecentsLockConfirmed(context)
+                if (isBatteryExempt) {
+                    showBatteryExemptionDialog = false
+                }
                 kotlinx.coroutines.delay(1000) // check every 1 second
             }
         }
 
-        val isGuardConnected = isAccessibilityEnabled || isAccessibilityServiceRunning
+        // Explanatory Dialog on every app start when battery optimization is NOT ignored
+        if (showBatteryExemptionDialog && !isBatteryExempt) {
+            AlertDialog(
+                onDismissRequest = { showBatteryExemptionDialog = false },
+                shape = RoundedCornerShape(22.dp),
+                containerColor = Color(0xFF0F172A),
+                icon = {
+                    Box(
+                        modifier = Modifier
+                            .size(50.dp)
+                            .background(Color(0xFFF59E0B).copy(alpha = 0.16f), CircleShape)
+                            .border(1.dp, Color(0xFFF59E0B).copy(alpha = 0.5f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.PowerSettingsNew,
+                            contentDescription = null,
+                            tint = Color(0xFFFBBF24),
+                            modifier = Modifier.size(26.dp)
+                        )
+                    }
+                },
+                title = {
+                    Text(
+                        text = if (isBn) "ব্যাটারি অপটিমাইজেশন ছাড় আবশ্যক ⚡" else "Battery Exemption Required ⚡",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 17.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = if (isBn)
+                                "OPPO (ColorOS), Realme, Xiaomi ও Vivo ফোনে ব্যাটারি অপটিমাইজেশন চালু থাকলে ১ দিনের মধ্যে সিস্টেম সেটিংস গার্ড বন্ধ করে দেয়—যদিও সেটিংসে এটি ON দেখায়।"
+                            else
+                                "Without battery-optimization exemption, phones like OPPO (ColorOS), Realme, and Xiaomi kill Settings Guard after ~1 day even while Settings still shows it ON.",
+                            color = Color(0xFFE2E8F0),
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp
+                        )
+                        Text(
+                            text = if (isBn)
+                                "স্থায়ী ২৪/৭ সুরক্ষার জন্য নিচের বাটনে ট্যাপ করে 'Allow' / 'Unrestricted' অনুমতি দিন।"
+                            else
+                                "Tap below and select 'Allow' / 'Don't optimize' so Settings Guard stays alive 24/7.",
+                            color = Color(0xFF38BDF8),
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            lineHeight = 17.sp
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            AntiUninstallManager.requestIgnoreBatteryOptimization(context)
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF10B981),
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = if (isBn) "ব্যাটারি ছাড় চালু করুন" else "Grant Battery Exemption",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showBatteryExemptionDialog = false }) {
+                        Text(
+                            text = if (isBn) "পরে" else "Later",
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                }
+            )
+        }
+
+        val isGuardConnected = isAccessibilityEnabled && isAccessibilityServiceRunning
         val isBatteryIgnored = isBatteryExempt
+
+        // Live 4-Requirement Protection Status Card (Main Screen)
+        ProtectionLiveStatusCard(
+            isGuardAlive = isGuardConnected,
+            isGuardDeadButEnabled = isAccessibilityDeadButEnabled,
+            isBatteryOptimizationIgnored = isBatteryIgnored,
+            isOemAutoStartConfigured = isOemAutoStartVisited,
+            isRecentsLockConfirmed = isRecentsLockConfirmed,
+            onFixAccessibility = {
+                AntiUninstallManager.requestAccessibilityService(context)
+            },
+            onFixBatteryOptimization = {
+                AntiUninstallManager.requestIgnoreBatteryOptimization(context)
+            },
+            onFixOemAutoStart = {
+                AntiUninstallManager.openOemAutoStartSettings(context)
+                isOemAutoStartVisited = true
+            },
+            onConfirmRecentsLock = {
+                AntiUninstallManager.markRecentsLockConfirmed(context, true)
+                isRecentsLockConfirmed = true
+            }
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
 
         // Compact 2-Column Unified Protection Grid Card (Matching Screenshot 1)
         UnifiedProtectionCard(
@@ -10587,6 +10747,7 @@ fun HomeScreen(
             isDnsActive = true,
             isVpnActive = vpnServiceRunning,
             isGuardActive = isGuardConnected,
+            isGuardDeadButEnabled = isAccessibilityDeadButEnabled,
             isBatteryExempt = isBatteryIgnored,
             isAdminActive = isDeviceAdminEnabled,
             onPinClick = {
@@ -10640,13 +10801,23 @@ fun HomeScreen(
                     android.widget.Toast.makeText(
                         context,
                         if (LanguageStore.currentLanguage.value == "bn")
-                            "🛡️ সেটিংস গার্ড সক্রিয় ও স্থায়ীভাবে লক করা আছে! এটি বন্ধ করার কোনো সুযোগ নেই।"
+                            "🛡️ সেটিংস গার্ড সক্রিয় (Alive) ও স্থায়ীভাবে লক করা আছে!"
                         else
-                            "🛡️ Settings Guard is active and permanently locked! It cannot be turned off.",
+                            "🛡️ Settings Guard is Alive and permanently locked!",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                } else if (isAccessibilityDeadButEnabled) {
+                    AntiUninstallManager.requestAccessibilityService(context)
+                    android.widget.Toast.makeText(
+                        context,
+                        if (LanguageStore.currentLanguage.value == "bn")
+                            "⚠️ ফোন সিস্টেম গার্ড থামিয়ে দিয়েছে! Accessibility-তে গিয়ে Purity Tracker একবার OFF করে আবার ON করুন।"
+                        else
+                            "⚠️ Phone stopped the guard process! In Accessibility Settings, toggle Purity Tracker OFF and ON again.",
                         android.widget.Toast.LENGTH_LONG
                     ).show()
                 } else {
-                    SettingsGuardWatchdogService.start(context)
+                    SettingsGuardWatchdogService.startIfInForeground(context)
                     AntiUninstallManager.requestAccessibilityService(context)
                     android.widget.Toast.makeText(
                         context,
@@ -10657,17 +10828,11 @@ fun HomeScreen(
             },
             onBatteryClick = {
                 try {
-                    if (!AntiUninstallManager.isSystemBatteryOptimizationIgnored(context)) {
+                    if (!AntiUninstallManager.isBatteryOptimizationIgnored(context)) {
                         AntiUninstallManager.requestIgnoreBatteryOptimization(context)
                     } else {
-                        AntiUninstallManager.openAutoStartSettings(context)
-                        android.widget.Toast.makeText(
-                            context,
-                            if (LanguageStore.currentLanguage.value == "bn") "⚡ ফোরগ্রাউন্ড, ব্যাকগ্রাউন্ড ও অটো-লঞ্চ সুরক্ষা সক্রিয় আছে।" else "⚡ Foreground, Background & Auto-launch protection is active.",
-                            android.widget.Toast.LENGTH_SHORT
-                        ).show()
+                        AntiUninstallManager.openOemAutoStartSettings(context)
                     }
-                    isBatteryExempt = true
                 } catch (e: Exception) {}
             },
             onAdminClick = {
@@ -10845,11 +11010,306 @@ fun ProtectionChip2Col(
 }
 
 @Composable
+fun ProtectionLiveStatusCard(
+    isGuardAlive: Boolean,
+    isGuardDeadButEnabled: Boolean,
+    isBatteryOptimizationIgnored: Boolean,
+    isOemAutoStartConfigured: Boolean,
+    isRecentsLockConfirmed: Boolean,
+    onFixAccessibility: () -> Unit,
+    onFixBatteryOptimization: () -> Unit,
+    onFixOemAutoStart: () -> Unit,
+    onConfirmRecentsLock: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isLightMode = com.example.ui.theme.GlassTheme.isLightMode.value
+    val isBn = LanguageStore.currentLanguage.value == "bn"
+    val brandName = remember { AntiUninstallManager.getDeviceBrandName() }
+    var showRecentsGuideDialog by remember { mutableStateOf(false) }
+
+    if (showRecentsGuideDialog) {
+        AlertDialog(
+            onDismissRequest = { showRecentsGuideDialog = false },
+            shape = RoundedCornerShape(22.dp),
+            containerColor = Color(0xFF0F172A),
+            title = {
+                Text(
+                    text = if (isBn) "$brandName — রিসেন্ট অ্যাপ লক নির্দেশিকা 🔒" else "$brandName — Lock in Recents Guide 🔒",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.5.sp
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = AntiUninstallManager.getBrandRecentsLockInstruction(isBn),
+                        color = Color(0xFFE2E8F0),
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onConfirmRecentsLock()
+                        showRecentsGuideDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF10B981),
+                        contentColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        text = if (isBn) "লক করেছি (নিশ্চিত করুন)" else "I Locked It in Recents",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showRecentsGuideDialog = false
+                        onFixOemAutoStart()
+                    }
+                ) {
+                    Text(
+                        text = if (isBn) "অ্যাপ সেটিংস খুলুন" else "Open App Settings",
+                        color = Color(0xFF38BDF8)
+                    )
+                }
+            }
+        )
+    }
+
+    val healthyCount = listOf(
+        isGuardAlive,
+        isBatteryOptimizationIgnored,
+        isOemAutoStartConfigured,
+        isRecentsLockConfirmed
+    ).count { it }
+
+    val statusAccent = when {
+        isGuardDeadButEnabled || !isGuardAlive || !isBatteryOptimizationIgnored -> Color(0xFFEF4444)
+        healthyCount == 4 -> Color(0xFF10B981)
+        else -> Color(0xFFF59E0B)
+    }
+
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .glassCard(cornerSize = 20.dp, glassAlpha = 0.95f, hasSheen = false),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+        border = BorderStroke(1.2.dp, statusAccent.copy(alpha = 0.45f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .background(statusAccent.copy(alpha = 0.16f), RoundedCornerShape(10.dp))
+                            .border(1.dp, statusAccent.copy(alpha = 0.45f), RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (healthyCount == 4) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = statusAccent,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = if (isBn) "লাইভ প্রটেকশন স্ট্যাটাস" else "Protection Status (Live)",
+                            color = if (isLightMode) Color(0xFF0F172A) else Color.White,
+                            fontSize = 14.5.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = if (isBn) "ডিভাইস: $brandName" else "Device: $brandName",
+                            color = if (isLightMode) Color(0xFF475569) else Color(0xFF94A3B8),
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .background(statusAccent.copy(alpha = 0.16f), RoundedCornerShape(10.dp))
+                        .border(1.dp, statusAccent.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = if (isBn) "$healthyCount/৪ প্রস্তুত" else "$healthyCount/4 Ready",
+                        color = statusAccent,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+            }
+
+            if (isGuardDeadButEnabled) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFEF4444).copy(alpha = 0.16f)),
+                    border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = if (isBn)
+                            "⚠️ সেটিংসে ON দেখালেও ফোন সিস্টেম গার্ড প্রসেস থামিয়ে দিয়েছে! ঠিক করতে নিচের বাটনে চাপুন এবং Purity Tracker একবার OFF করে আবার ON করুন।"
+                        else
+                            "⚠️ Guard is DEAD-BUT-ENABLED: Settings shows ON, but the phone stopped the service. Tap Fix below, then toggle Purity Tracker OFF and ON again.",
+                        color = Color(0xFFFCA5A5),
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        lineHeight = 16.sp,
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+            }
+
+            // 1. Accessibility service enabled & alive
+            LiveRequirementRow(
+                title = if (isBn) "১. অ্যাক্সেসিবিলিটি গার্ড সচল (Alive)" else "1. Accessibility Service Alive",
+                statusText = when {
+                    isGuardAlive -> if (isBn) "সচল (LIVE)" else "ALIVE"
+                    isGuardDeadButEnabled -> if (isBn) "থেমে গেছে (OFF→ON করুন)" else "DEAD (Toggle OFF→ON)"
+                    else -> if (isBn) "বন্ধ (OFF)" else "OFF"
+                },
+                isOk = isGuardAlive,
+                actionLabel = when {
+                    isGuardAlive -> if (isBn) "চেক" else "Check"
+                    isGuardDeadButEnabled -> if (isBn) "রিস্টার্ট করুন" else "Rebind"
+                    else -> if (isBn) "চালু করুন" else "Enable"
+                },
+                onActionClick = onFixAccessibility
+            )
+
+            // 2. Battery optimization ignored (real PowerManager value)
+            LiveRequirementRow(
+                title = if (isBn) "২. ব্যাটারি অপটিমাইজেশন ছাড় (PowerManager)" else "2. Battery Optimization Ignored",
+                statusText = if (isBatteryOptimizationIgnored) {
+                    if (isBn) "অনুমোদিত (Ignored)" else "Ignored (OK)"
+                } else {
+                    if (isBn) "চালু নেই (ঝুঁকিপূর্ণ)" else "NOT Ignored"
+                },
+                isOk = isBatteryOptimizationIgnored,
+                actionLabel = if (isBatteryOptimizationIgnored) (if (isBn) "সক্রিয়" else "Active") else (if (isBn) "অনুমতি দিন" else "Allow"),
+                onActionClick = onFixBatteryOptimization
+            )
+
+            // 3. OEM auto-start allowed
+            LiveRequirementRow(
+                title = if (isBn) "৩. অটো-স্টার্ট ও ব্যাকগ্রাউন্ড পারমিশন ($brandName)" else "3. OEM Auto-Start ($brandName)",
+                statusText = if (isOemAutoStartConfigured) {
+                    if (isBn) "খোলা হয়েছে" else "Configured"
+                } else {
+                    if (isBn) "সেটআপ প্রয়োজন" else "Setup Needed"
+                },
+                isOk = isOemAutoStartConfigured,
+                actionLabel = if (isBn) "সেটিংস খুলুন" else "Open OEM",
+                onActionClick = onFixOemAutoStart
+            )
+
+            // 4. App locked in Recents / background activity allowed
+            LiveRequirementRow(
+                title = if (isBn) "৪. রিসেন্ট অ্যাপে তালা (Lock in Recents)" else "4. App Locked in Recents",
+                statusText = if (isRecentsLockConfirmed) {
+                    if (isBn) "লক করা হয়েছে" else "Locked"
+                } else {
+                    if (isBn) "নির্দেশিকা দেখুন" else "How to Lock"
+                },
+                isOk = isRecentsLockConfirmed,
+                actionLabel = if (isBn) "নিয়ম দেখুন" else "Guide",
+                onActionClick = { showRecentsGuideDialog = true }
+            )
+        }
+    }
+}
+
+@Composable
+private fun LiveRequirementRow(
+    title: String,
+    statusText: String,
+    isOk: Boolean,
+    actionLabel: String,
+    onActionClick: () -> Unit
+) {
+    val isLightMode = com.example.ui.theme.GlassTheme.isLightMode.value
+    val rowBg = if (isOk) {
+        if (isLightMode) Color(0xFFECFDF5) else Color(0xFF0A221B).copy(alpha = 0.65f)
+    } else {
+        if (isLightMode) Color(0xFFFEF2F2) else Color(0xFF2A1215).copy(alpha = 0.65f)
+    }
+    val borderCol = if (isOk) Color(0xFF10B981).copy(alpha = 0.4f) else Color(0xFFEF4444).copy(alpha = 0.45f)
+    val badgeCol = if (isOk) Color(0xFF34D399) else Color(0xFFF87171)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(rowBg, RoundedCornerShape(12.dp))
+            .border(1.dp, borderCol, RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                color = if (isLightMode) Color(0xFF0F172A) else Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = statusText,
+                color = badgeCol,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.ExtraBold
+            )
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        Button(
+            onClick = onActionClick,
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+            modifier = Modifier.height(32.dp),
+            shape = RoundedCornerShape(9.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (isOk) Color(0xFF10B981).copy(alpha = 0.25f) else Color(0xFFEF4444),
+                contentColor = Color.White
+            )
+        ) {
+            Text(
+                text = actionLabel,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
 fun UnifiedProtectionCard(
     hasPin: Boolean,
     isDnsActive: Boolean,
     isVpnActive: Boolean,
     isGuardActive: Boolean,
+    isGuardDeadButEnabled: Boolean = false,
     isBatteryExempt: Boolean,
     isAdminActive: Boolean,
     onPinClick: () -> Unit,
@@ -10965,7 +11425,11 @@ fun UnifiedProtectionCard(
                     accentColor = Color(0xFF10B981)
                 )
                 ProtectionChip2Col(
-                    title = if (isBn) "সেটিংস গার্ড" else "Settings Guard",
+                    title = if (isGuardDeadButEnabled) {
+                        if (isBn) "গার্ড থেমে গেছে!" else "Guard DEAD!"
+                    } else {
+                        if (isBn) "সেটিংস গার্ড" else "Settings Guard"
+                    },
                     icon = Icons.Outlined.Lock,
                     isActive = isGuardActive,
                     onClick = onGuardClick,
@@ -10974,13 +11438,13 @@ fun UnifiedProtectionCard(
                 )
             }
 
-            // Row 3: Auto-start | Anti-Uninstall
+            // Row 3: Battery Exempt | Anti-Uninstall
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 ProtectionChip2Col(
-                    title = if (isBn) "অটো-স্টার্ট" else "Auto-start",
+                    title = if (isBn) "ব্যাটারি ছাড়" else "Battery Exempt",
                     icon = Icons.Outlined.PowerSettingsNew,
                     isActive = isBatteryExempt,
                     onClick = onBatteryClick,
