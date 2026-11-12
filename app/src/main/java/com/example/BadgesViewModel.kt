@@ -18,9 +18,22 @@ data class CustomBadge(
     val imageUrl: String = ""
 )
 
+val DEFAULT_BADGES = listOf(
+    CustomBadge("default_0", "Clown", 0, "Initial stage", "res://badge_0"),
+    CustomBadge("default_1", "New Warrior", 1, "1 day clean", "res://badge_1"),
+    CustomBadge("default_2", "Novice", 3, "3 days clean", "res://badge_2"),
+    CustomBadge("default_3", "Average", 7, "7 days clean", "res://badge_3"),
+    CustomBadge("default_4", "Advanced", 15, "15 days clean", "res://badge_4"),
+    CustomBadge("default_5", "Sigma", 30, "1 month clean", "res://badge_5"),
+    CustomBadge("default_6", "Chad", 45, "45 days clean", "res://badge_6"),
+    CustomBadge("default_7", "Absolute Chad", 60, "2 months clean", "res://badge_7"),
+    CustomBadge("default_8", "Giga Chad", 120, "4 months clean", "res://badge_8"),
+    CustomBadge("default_9", "Absolute Giga Chad", 365, "1 year clean", "res://badge_9")
+)
+
 class BadgesViewModel : ViewModel() {
     private val db = FirebaseFirestore.getInstance()
-    private val _badges = MutableStateFlow<List<CustomBadge>>(emptyList())
+    private val _badges = MutableStateFlow<List<CustomBadge>>(DEFAULT_BADGES)
     val badges = _badges.asStateFlow()
 
     init {
@@ -28,24 +41,26 @@ class BadgesViewModel : ViewModel() {
     }
 
     private fun fetchBadges() {
-        db.collection("badges")
-            .orderBy("requiredDays")
-            .addSnapshotListener { snapshot, e ->
-                if (e != null) {
-                    Log.w("BadgesViewModel", "Listen failed.", e)
-                    return@addSnapshotListener
-                }
-                if (snapshot != null) {
-                    val badgeList = snapshot.documents.mapNotNull {
-                        it.toObject(CustomBadge::class.java)?.copy(id = it.id)
+        try {
+            db.collection("badges")
+                .orderBy("requiredDays")
+                .addSnapshotListener { snapshot, e ->
+                    if (e != null) {
+                        Log.w("BadgesViewModel", "Listen failed. Default badges retained.", e)
+                        return@addSnapshotListener
                     }
-                    if (badgeList.isEmpty()) {
-                        setupDefaultBadges()
-                    } else {
-                        _badges.value = badgeList
+                    if (snapshot != null) {
+                        val badgeList = snapshot.documents.mapNotNull {
+                            it.toObject(CustomBadge::class.java)?.copy(id = it.id)
+                        }
+                        if (badgeList.isNotEmpty()) {
+                            _badges.value = badgeList
+                        }
                     }
                 }
-            }
+        } catch (e: Exception) {
+            Log.e("BadgesViewModel", "Error fetching badges", e)
+        }
     }
 
     private fun setupDefaultBadges() {

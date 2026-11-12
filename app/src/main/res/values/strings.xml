@@ -2,6 +2,7 @@
     <string name="app_name">Purity Tracker</string>
     <string name="web_client_id">147350971957-n3hppeeka9ih68njpn0ahjo84ne07d70.apps.googleusercontent.com</string>
     <string name="accessibility_service_description">This service protects your recovery streak by preventing bypasses or uninstallations.</string>
+    <string name="device_admin_description">Purity Tracker ডিভাইস অ্যাডমিন সক্রিয় থাকলে অ্যাপটি আনইনস্টল বা বন্ধ করা যাবে না।</string>
     <string name="nav_home">Home</string>
     <string name="nav_history">History</string>
     <string name="nav_focus">Focus</string>

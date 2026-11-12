@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.example.ui.theme.glassCard
 
 @Composable
 fun PremiumPaywallScreen(
@@ -36,6 +37,16 @@ fun PremiumPaywallScreen(
     
     val currentLang = LanguageStore.currentLanguage.value
     val isBn = currentLang == "bn"
+    val isLightMode = com.example.ui.theme.GlassTheme.isLightMode.value
+
+    val titleColor = if (isLightMode) Color(0xFF0F172A) else Color.White
+    val subtitleColor = if (isLightMode) Color(0xFF475569) else Color(0xFFCBD5E1)
+    val featureCardBg = if (isLightMode) Color.White.copy(alpha = 0.95f) else CardBlue
+    val featureCardBorder = if (isLightMode) BorderStroke(1.5.dp, Color(0xFFCBD5E1)) else BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+    val itemTextColor = if (isLightMode) Color(0xFF1E293B) else Color.White
+    val sectionHeaderColor = if (isLightMode) Color(0xFF0F172A) else Color.LightGray
+    val closeBtnTint = if (isLightMode) Color(0xFF0F172A) else Color.White
+    val closeBtnBg = if (isLightMode) Color.Black.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.1f)
     
     // Helpers for translation
     fun pt(en: String, bn: String): String = if (isBn) bn else en
@@ -108,21 +119,21 @@ fun PremiumPaywallScreen(
                 IconButton(
                     onClick = onClose,
                     modifier = Modifier
-                        .background(Color.White.copy(alpha = 0.1f), CircleShape)
+                        .background(closeBtnBg, CircleShape)
                         .size(36.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Close",
-                        tint = Color.White,
+                        tint = closeBtnTint,
                         modifier = Modifier.size(18.dp)
                     )
                 }
                 
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFD700).copy(alpha = 0.15f)),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFD700).copy(alpha = if (isLightMode) 0.25f else 0.15f)),
                     shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, Color(0xFFFFD700).copy(alpha = 0.3f))
+                    border = BorderStroke(1.dp, Color(0xFFFFD700).copy(alpha = 0.5f))
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -131,13 +142,13 @@ fun PremiumPaywallScreen(
                         Icon(
                             imageVector = Icons.Default.Stars,
                             contentDescription = null,
-                            tint = Color(0xFFFFD700),
+                            tint = if (isLightMode) Color(0xFFB45309) else Color(0xFFFFD700),
                             modifier = Modifier.size(14.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = pt("PRO", "খেতাব প্রো"),
-                            color = Color(0xFFFFD700),
+                            color = if (isLightMode) Color(0xFFB45309) else Color(0xFFFFD700),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -155,8 +166,8 @@ fun PremiumPaywallScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = 12.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFD700).copy(alpha = 0.08f)),
-                    border = BorderStroke(1.5.dp, Color(0xFFFFD700).copy(alpha = 0.5f)),
+                    colors = CardDefaults.cardColors(containerColor = if (isLightMode) Color(0xFFFEF3C7) else Color(0xFFFFD700).copy(alpha = 0.08f)),
+                    border = BorderStroke(1.5.dp, Color(0xFFFFD700).copy(alpha = 0.7f)),
                     shape = RoundedCornerShape(16.dp)
                 ) {
                     Column(
@@ -165,7 +176,7 @@ fun PremiumPaywallScreen(
                     ) {
                         Text(
                             text = "👑 ACTIVE WARRIOR PRO 👑",
-                            color = Color(0xFFFFD700),
+                            color = if (isLightMode) Color(0xFFB45309) else Color(0xFFFFD700),
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Black,
                             letterSpacing = 1.sp
@@ -176,7 +187,7 @@ fun PremiumPaywallScreen(
                                 "Your recovery features and Golden VIP Crown/Blue Tick are fully active.",
                                 "আপনার সকল প্রিমিয়াম আত্মনিয়ন্ত্রণ ফিচার ও গোল্ডেন ভিআইপি ক্রাউন/ব্লু ব্যাজ সক্রিয় রয়েছে!"
                             ),
-                            color = Color.White,
+                            color = itemTextColor,
                             fontSize = 11.5.sp,
                             textAlign = TextAlign.Center,
                             lineHeight = 16.sp
@@ -184,37 +195,53 @@ fun PremiumPaywallScreen(
                         Spacer(modifier = Modifier.height(14.dp))
                         
                         if (expiryTimeLocal > System.currentTimeMillis()) {
-                            val diffMs = expiryTimeLocal - System.currentTimeMillis()
-                            val daysLeft = diffMs / (24 * 60 * 60 * 1000L)
-                            val hoursLeft = (diffMs % (24 * 60 * 60 * 1000L)) / (60 * 60 * 1000L)
-                            val minsLeft = (diffMs % (60 * 60 * 1000L)) / (60 * 1000L)
+                            val timeInfo = PremiumManager.getPremiumTimeInfo(true, expiryTimeLocal)
                             
-                            val countdownText = if (daysLeft > 1000) {
+                            val countdownText = if (timeInfo.isLifetime) {
                                 pt("Lifetime Access ♾️", "আজীবন মেয়াদী অ্যাক্সেস ♾️")
                             } else {
                                 pt(
-                                    "$daysLeft Days, $hoursLeft Hours, $minsLeft Min remaining",
-                                    "$daysLeft দিন, $hoursLeft ঘণ্টা, $minsLeft মিনিট মেয়াদ বাকি আছে"
+                                    "${timeInfo.daysLeft} Days, ${timeInfo.hoursLeft} Hours, ${timeInfo.minsLeft} Min remaining\n(Expires: ${timeInfo.formattedExpiryDate})",
+                                    "${timeInfo.daysLeft} দিন, ${timeInfo.hoursLeft} ঘণ্টা, ${timeInfo.minsLeft} মিনিট মেয়াদ বাকি\n(মেয়াদ শেষ: ${timeInfo.formattedExpiryDate})"
                                 )
                             }
                             
                             Box(
                                 modifier = Modifier
-                                    .background(Color(0xFF151F30), RoundedCornerShape(8.dp))
-                                    .border(1.dp, Color(0xFFFFD700).copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-                                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                                    .background(
+                                        if (timeInfo.isExpiringSoon) Color(0xFFFEF3C7) else (if (isLightMode) Color.White else Color(0xFF151F30)),
+                                        RoundedCornerShape(10.dp)
+                                    )
+                                    .border(
+                                        1.5.dp,
+                                        if (timeInfo.isExpiringSoon) Color(0xFFF59E0B) else Color(0xFFFFD700).copy(alpha = 0.6f),
+                                        RoundedCornerShape(10.dp)
+                                    )
+                                    .padding(horizontal = 16.dp, vertical = 10.dp)
                             ) {
-                                Text(
-                                    text = countdownText,
-                                    color = Color(0xFFFFD700),
-                                    fontSize = 13.5.sp,
-                                    fontWeight = FontWeight.ExtraBold
-                                )
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    if (timeInfo.isExpiringSoon) {
+                                        Text(
+                                            text = pt("⚠️ Plan Expiring Soon! Renew now.", "⚠️ সাবস্ক্রিপশনের মেয়াদ দ্রুত শেষ হচ্ছে! রিনিউ করুন।"),
+                                            color = Color(0xFFD97706),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                    }
+                                    Text(
+                                        text = countdownText,
+                                        color = if (isLightMode) (if (timeInfo.isExpiringSoon) Color(0xFF92400E) else Color(0xFFB45309)) else Color(0xFFFFD700),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
                             }
                         } else {
                             Text(
                                 text = pt("Checking subscription validity...", "সাবস্ক্রিপশন মেয়াদ চেক করা হচ্ছে..."),
-                                color = Color.Gray,
+                                color = subtitleColor,
                                 fontSize = 11.sp
                             )
                         }
@@ -240,7 +267,7 @@ fun PremiumPaywallScreen(
                     .background(
                         Brush.radialGradient(
                             colors = listOf(
-                                Color(0xFFFFD700).copy(alpha = 0.3f),
+                                Color(0xFFFFD700).copy(alpha = 0.35f),
                                 Color.Transparent
                             )
                         ),
@@ -260,7 +287,7 @@ fun PremiumPaywallScreen(
 
             Text(
                 text = pt("Upgrade to Warrior Pro 👑", "যোদ্ধা প্রো-তে আপগ্রেড করুন 👑"),
-                color = Color.White,
+                color = titleColor,
                 fontSize = 24.sp,
                 fontWeight = FontWeight.ExtraBold,
                 textAlign = TextAlign.Center
@@ -270,7 +297,7 @@ fun PremiumPaywallScreen(
             
             Text(
                 text = pt("Unlock ultimate recovery and exclusive community benefits", "পবিত্র চরিত্র গঠন ও অসাধারণ প্রিমিয়াম সুযোগসমূহ আনলক করুন"),
-                color = Color.LightGray,
+                color = subtitleColor,
                 fontSize = 13.sp,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(horizontal = 16.dp)
@@ -280,17 +307,18 @@ fun PremiumPaywallScreen(
 
             // Features Card
             Card(
-                colors = CardDefaults.cardColors(containerColor = CardBlue),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
-                modifier = Modifier.fillMaxWidth()
+                colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+                shape = RoundedCornerShape(20.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .glassCard(cornerSize = 20.dp, glassAlpha = 0.95f, hasSheen = true)
             ) {
                 Column(
                     modifier = Modifier.padding(18.dp)
                 ) {
                     Text(
                         text = pt("EXCLUSIVE PRO FEATURES", "প্রিমিয়াম ফিচারের তালিকা:"),
-                        color = CyanAccent,
+                        color = if (isLightMode) Color(0xFF0284C7) else CyanAccent,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 1.sp
@@ -324,7 +352,7 @@ fun PremiumPaywallScreen(
                                     else -> Icons.Default.Leaderboard
                                 },
                                 contentDescription = null,
-                                tint = Color(0xFFFFD700),
+                                tint = if (isLightMode) Color(0xFFD97706) else Color(0xFFFFD700),
                                 modifier = Modifier
                                     .size(20.dp)
                                     .padding(top = 2.dp)
@@ -332,9 +360,9 @@ fun PremiumPaywallScreen(
                             Spacer(modifier = Modifier.width(12.dp))
                             Text(
                                 text = text,
-                                color = Color.White,
+                                color = itemTextColor,
                                 fontSize = 13.5.sp,
-                                fontWeight = FontWeight.Normal,
+                                fontWeight = FontWeight.Medium,
                                 lineHeight = 18.sp
                             )
                         }
@@ -347,7 +375,7 @@ fun PremiumPaywallScreen(
             // Plan Selection Section
             Text(
                 text = pt("Choose your spiritual recovery plan:", "অনুকূল প্যাকেজটি বেছে নিন:"),
-                color = Color.LightGray,
+                color = sectionHeaderColor,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier
@@ -376,11 +404,15 @@ fun PremiumPaywallScreen(
                             .weight(1f)
                             .clickable { selectedPlan = id },
                         colors = CardDefaults.cardColors(
-                            containerColor = if (isSelected) Color(0xFFFFD700).copy(alpha = 0.08f) else CardBlue
+                            containerColor = if (isSelected) {
+                                if (isLightMode) Color(0xFFFEF3C7) else Color(0xFFFFD700).copy(alpha = 0.12f)
+                            } else {
+                                if (isLightMode) Color.White.copy(alpha = 0.95f) else CardBlue
+                            }
                         ),
                         border = BorderStroke(
                             width = if (isSelected) 2.dp else 1.dp,
-                            color = if (isSelected) Color(0xFFFFD700) else Color.White.copy(alpha = 0.1f)
+                            color = if (isSelected) Color(0xFFFFD700) else (if (isLightMode) Color(0xFFCBD5E1) else Color.White.copy(alpha = 0.1f))
                         ),
                         shape = RoundedCornerShape(14.dp)
                     ) {
@@ -392,7 +424,11 @@ fun PremiumPaywallScreen(
                         ) {
                             Text(
                                 text = title,
-                                color = if (isSelected) Color(0xFFFFD700) else Color.White,
+                                color = if (isSelected) {
+                                    if (isLightMode) Color(0xFFB45309) else Color(0xFFFFD700)
+                                } else {
+                                    itemTextColor
+                                },
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 textAlign = TextAlign.Center,
@@ -401,7 +437,11 @@ fun PremiumPaywallScreen(
                             Spacer(modifier = Modifier.height(10.dp))
                             Text(
                                 text = priceText,
-                                color = if (isSelected) Color(0xFFFFD700) else GreenText,
+                                color = if (isSelected) {
+                                    if (isLightMode) Color(0xFFB45309) else Color(0xFFFFD700)
+                                } else {
+                                    if (isLightMode) Color(0xFF059669) else GreenText
+                                },
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 textAlign = TextAlign.Center
@@ -417,7 +457,7 @@ fun PremiumPaywallScreen(
             Button(
                 onClick = { showPaymentSheet = true },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFD700)),
-                shape = RoundedCornerShape(16.dp),
+                shape = CircleShape,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(54.dp)
@@ -440,7 +480,7 @@ fun PremiumPaywallScreen(
             
             Text(
                 text = pt("🔒 100% Risk Free • Instant Access • Encrypted Payment", "🔒 শতভাগ নিরাপদ গেটওয়ে • ওয়ান-ক্লিক ইনস্ট্যান্ট অ্যাক্টিভেশন"),
-                color = Color.Gray,
+                color = subtitleColor,
                 fontSize = 10.sp,
                 textAlign = TextAlign.Center
             )
@@ -462,14 +502,19 @@ fun PremiumPaywallScreen(
                 contentAlignment = Alignment.BottomCenter
             ) {
                 // Prevent inner clicks from closing
+                val sheetBg = if (isLightMode) Color(0xFFF8FAFC) else Color(0xFF151F30)
+                val sheetBorder = if (isLightMode) BorderStroke(1.dp, Color(0xFFE2E8F0)) else BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+                val innerCardBg = if (isLightMode) Color.White else Color.White.copy(alpha = 0.04f)
+                val innerCardBorder = if (isLightMode) BorderStroke(1.dp, Color(0xFFE2E8F0)) else BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+                
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
                         .clickable(enabled = false, onClick = {})
-                        .background(Color(0xFF151F30)),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF151F30)),
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+                        .background(sheetBg),
+                    colors = CardDefaults.cardColors(containerColor = sheetBg),
+                    border = sheetBorder
                 ) {
                     Column(
                         modifier = Modifier
@@ -481,7 +526,7 @@ fun PremiumPaywallScreen(
                         Box(
                             modifier = Modifier
                                 .size(40.dp, 4.dp)
-                                .background(Color.Gray.copy(alpha = 0.4f), CircleShape)
+                                .background(if (isLightMode) Color(0xFFCBD5E1) else Color.Gray.copy(alpha = 0.4f), CircleShape)
                         )
                         
                         Spacer(modifier = Modifier.height(16.dp))
@@ -489,14 +534,14 @@ fun PremiumPaywallScreen(
                         if (paymentStep == 1) {
                             Text(
                                 text = pt("Manual Secure Payment 🔒", "ম্যানুয়াল পেমেন্ট গেটওয়ে 🔒"),
-                                color = Color.White,
+                                color = titleColor,
                                 fontSize = 17.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text = pt("Total Payable Amount: $planPriceEn", "মোট পরিশোধযোগ্য মূল্য: $planPrice"),
-                                color = GreenText,
+                                color = if (isLightMode) Color(0xFF059669) else GreenText,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -528,15 +573,15 @@ fun PremiumPaywallScreen(
                                         modifier = Modifier
                                             .weight(1f)
                                             .clip(RoundedCornerShape(10.dp))
-                                            .background(if (isMethodSelected) baseColor else CardBlue)
-                                            .border(1.dp, if (isMethodSelected) baseColor else Color.White.copy(alpha = 0.05f), RoundedCornerShape(10.dp))
+                                            .background(if (isMethodSelected) baseColor else (if (isLightMode) Color.White else CardBlue))
+                                            .border(1.dp, if (isMethodSelected) baseColor else (if (isLightMode) Color(0xFFCBD5E1) else Color.White.copy(alpha = 0.05f)), RoundedCornerShape(10.dp))
                                             .clickable { selectedMethod = id }
                                             .padding(vertical = 10.dp),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
                                             text = name,
-                                            color = Color.White,
+                                            color = if (isMethodSelected) Color.White else titleColor,
                                             fontSize = 11.sp,
                                             fontWeight = FontWeight.Bold
                                         )
@@ -553,14 +598,14 @@ fun PremiumPaywallScreen(
                             }
                             
                             Card(
-                                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.04f)),
-                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                                colors = CardDefaults.cardColors(containerColor = innerCardBg),
+                                border = innerCardBorder,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(modifier = Modifier.padding(12.dp)) {
                                     Text(
                                         text = pt("Send Money (Personal Number):", "সেন্ড মানি করুন (পার্সোনাল নাম্বার):"),
-                                        color = Color.LightGray,
+                                        color = subtitleColor,
                                         fontSize = 11.sp
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
@@ -571,7 +616,7 @@ fun PremiumPaywallScreen(
                                     ) {
                                         Text(
                                             text = "$pNumber (${selectedMethod.uppercase()})",
-                                            color = Color(0xFFFFD700),
+                                            color = if (isLightMode) Color(0xFFB45309) else Color(0xFFFFD700),
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 16.sp,
                                             letterSpacing = 1.sp
@@ -583,9 +628,9 @@ fun PremiumPaywallScreen(
                                                 android.widget.Toast.makeText(context, pt("Copied to Clipboard!", "নাম্বারটি কপি করা হয়েছে!"), android.widget.Toast.LENGTH_SHORT).show()
                                             },
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFD700)),
-                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp),
                                             modifier = Modifier.height(30.dp),
-                                            shape = RoundedCornerShape(8.dp)
+                                            shape = CircleShape
                                         ) {
                                             Text(pt("Copy", "কপি করুন"), color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                         }
@@ -593,7 +638,7 @@ fun PremiumPaywallScreen(
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
                                         text = pt("Instruction: Please send the exact amount to the personal number above, copy the transaction ID (TxnID) and enter details below.", "নির্দেশনাঃ উপরে উল্লেখিত নাম্বারে সঠিক পরিমাণ টাকা সেন্ড মানি করুন। তারপর ট্রানজেকশন আইডি কপি করে নিচের ফর্মে বসিয়ে পেমেন্ট রিকোয়েস্ট পাঠান।"),
-                                        color = Color.Gray,
+                                        color = subtitleColor,
                                         fontSize = 10.sp,
                                         lineHeight = 14.sp
                                     )
@@ -606,13 +651,16 @@ fun PremiumPaywallScreen(
                             OutlinedTextField(
                                 value = walletNumber,
                                 onValueChange = { walletNumber = it },
-                                label = { Text(pt("Your Wallet Number (from where you sent)", "যেই নাম্বার থেকে টাকা পাঠিয়েছেন"), color = Color.Gray, fontSize = 12.sp) },
+                                label = { Text(pt("Your Wallet Number (from where you sent)", "যেই নাম্বার থেকে টাকা পাঠিয়েছেন"), color = subtitleColor, fontSize = 12.sp) },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = Color.White,
-                                    unfocusedTextColor = Color.White,
-                                    focusedBorderColor = Color(0xFFFFD700)
+                                    focusedTextColor = titleColor,
+                                    unfocusedTextColor = titleColor,
+                                    focusedBorderColor = Color(0xFFFFD700),
+                                    unfocusedBorderColor = if (isLightMode) Color(0xFFCBD5E1) else Color.White.copy(alpha = 0.2f),
+                                    focusedContainerColor = if (isLightMode) Color.White else Color.Transparent,
+                                    unfocusedContainerColor = if (isLightMode) Color.White else Color.Transparent
                                 )
                             )
                             
@@ -622,25 +670,31 @@ fun PremiumPaywallScreen(
                                 OutlinedTextField(
                                     value = sentAmount,
                                     onValueChange = { sentAmount = it },
-                                    label = { Text(pt("Sent Amount (BDT)", "টাকার পরিমাণ (টাকা)"), color = Color.Gray, fontSize = 11.sp) },
+                                    label = { Text(pt("Sent Amount (BDT)", "টাকার পরিমাণ (টাকা)"), color = subtitleColor, fontSize = 11.sp) },
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                     modifier = Modifier.weight(1f),
                                     colors = OutlinedTextFieldDefaults.colors(
-                                        focusedTextColor = Color.White,
-                                        unfocusedTextColor = Color.White,
-                                        focusedBorderColor = Color(0xFFFFD700)
+                                        focusedTextColor = titleColor,
+                                        unfocusedTextColor = titleColor,
+                                        focusedBorderColor = Color(0xFFFFD700),
+                                        unfocusedBorderColor = if (isLightMode) Color(0xFFCBD5E1) else Color.White.copy(alpha = 0.2f),
+                                        focusedContainerColor = if (isLightMode) Color.White else Color.Transparent,
+                                        unfocusedContainerColor = if (isLightMode) Color.White else Color.Transparent
                                     )
                                 )
                                 
                                 OutlinedTextField(
                                     value = transactionId,
                                     onValueChange = { transactionId = it },
-                                    label = { Text(pt("Transaction ID (TxnID)", "ট্রানজেকশন আইডি (TxnID)"), color = Color.Gray, fontSize = 11.sp) },
+                                    label = { Text(pt("Transaction ID (TxnID)", "ট্রানজেকশন আইডি (TxnID)"), color = subtitleColor, fontSize = 11.sp) },
                                     modifier = Modifier.weight(1.3f),
                                     colors = OutlinedTextFieldDefaults.colors(
-                                        focusedTextColor = Color.White,
-                                        unfocusedTextColor = Color.White,
-                                        focusedBorderColor = Color(0xFFFFD700)
+                                        focusedTextColor = titleColor,
+                                        unfocusedTextColor = titleColor,
+                                        focusedBorderColor = Color(0xFFFFD700),
+                                        unfocusedBorderColor = if (isLightMode) Color(0xFFCBD5E1) else Color.White.copy(alpha = 0.2f),
+                                        focusedContainerColor = if (isLightMode) Color.White else Color.Transparent,
+                                        unfocusedContainerColor = if (isLightMode) Color.White else Color.Transparent
                                     )
                                 )
                             }
@@ -653,7 +707,7 @@ fun PremiumPaywallScreen(
                                 Text(
                                     text = pt("Submitting payment request to database...", "পেমেন্ট রিকোয়েস্ট ডাটাবেজে পাঠানো হচ্ছে..."),
                                     fontSize = 11.sp,
-                                    color = Color.Gray
+                                    color = subtitleColor
                                 )
                             } else {
                                 Button(
@@ -698,8 +752,8 @@ fun PremiumPaywallScreen(
                                             }
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFD700)),
-                                    shape = RoundedCornerShape(12.dp),
-                                    modifier = Modifier.fillMaxWidth()
+                                    shape = CircleShape,
+                                    modifier = Modifier.fillMaxWidth().height(48.dp)
                                 ) {
                                     Text(pt("Submit Payment Verification Request", "পেমেন্ট রিকোয়েস্ট পাঠান"), color = Color.Black, fontWeight = FontWeight.Bold)
                                 }
@@ -709,7 +763,7 @@ fun PremiumPaywallScreen(
                             Icon(
                                 imageVector = Icons.Default.CheckCircle,
                                 contentDescription = "Success",
-                                tint = GreenText,
+                                tint = if (isLightMode) Color(0xFF059669) else GreenText,
                                 modifier = Modifier.size(72.dp)
                             )
                             
@@ -717,7 +771,7 @@ fun PremiumPaywallScreen(
                             
                             Text(
                                 text = pt("Payment Request Submitted! 🎉", "পেমেন্ট রিকোয়েস্ট পাঠানো হয়েছে! 🎉"),
-                                color = Color.White,
+                                color = titleColor,
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 textAlign = TextAlign.Center
@@ -730,7 +784,7 @@ fun PremiumPaywallScreen(
                                     "Your transaction is listed. Admin will verify details and unlock your chosen Pro package shortly. Thank you!",
                                     "আপনার সাবমিট করা তথ্যটি সিস্টেমে নথিভুক্ত করা হয়েছে। এডমিন আপনার ট্রানজেকশন আইডি ও নাম্বার চেক করে অল্প সময়ের ভেতরেই আপনার অ্যাকাউন্টটির জন্য নির্বাচিত প্রো প্যাক আনলক করে দেবেন। ধন্যবাদ!"
                                 ),
-                                color = Color.LightGray,
+                                color = subtitleColor,
                                 fontSize = 12.sp,
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.padding(horizontal = 12.dp),
@@ -845,7 +899,7 @@ fun AdminPaymentsScreen(onBack: () -> Unit) {
                         contentColor = if (currentFilter == "pending") Color.Black else Color.White
                     ),
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(10.dp)
+                    shape = CircleShape
                 ) {
                     Text("পেন্ডিং রিকোয়েস্ট (${requests.count { it.status == "pending" }})", fontWeight = FontWeight.Bold, fontSize = 11.sp)
                 }
@@ -857,7 +911,7 @@ fun AdminPaymentsScreen(onBack: () -> Unit) {
                         contentColor = if (currentFilter == "all") Color.Black else Color.White
                     ),
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(10.dp)
+                    shape = CircleShape
                 ) {
                     Text("সকল হিস্টোরি (${requests.size})", fontWeight = FontWeight.Bold, fontSize = 11.sp)
                 }

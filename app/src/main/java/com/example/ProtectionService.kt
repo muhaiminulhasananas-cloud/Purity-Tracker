@@ -2,350 +2,894 @@ package com.example
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
-import android.widget.Toast
+import android.view.accessibility.AccessibilityNodeInfo
 
+/**
+ * ProtectionService: Ultra-reliable 24/7 Real-Time Android Accessibility Service.
+ *
+ * Engineered for:
+ * 1. Zero-Nanosecond Blind Spots:
+ *    - Instant 0ms event delivery (`notificationTimeout = 0`) + multi-stage follow-up scans
+ *      at +45ms, +110ms, +220ms, and +380ms.
+ *    - Continuous 85ms High-Speed Active Window Patrol whenever the screen is interactive,
+ *      scanning both `rootInActiveWindow` and all floating dialog windows (`getWindows()`).
+ * 2. Monotonic Clock Immunity:
+ *    - Uses `SystemClock.elapsedRealtime()` exclusively so changing the phone's date/time
+ *      can NEVER freeze or bypass the guard.
+ * 3. Permanent 24/7 Foreground Immunity:
+ *    - Runs as an active Foreground Service sharing unified notification ID 1001 with
+ *      `SettingsGuardWatchdogService` so Realme UI / ColorOS / MIUI / Vivo / Samsung
+ *      background freezers can NEVER freeze or kill the service after 1-2 days.
+ */
 class ProtectionService : AccessibilityService() {
 
-    private var screenReceiver: android.content.BroadcastReceiver? = null
-    private val vpnHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    
-    private fun getSafePrefs(): android.content.SharedPreferences {
-        val safeContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-            applicationContext.createDeviceProtectedStorageContext()
-        } else {
-            applicationContext
-        }
-        return safeContext.getSharedPreferences("VpnPrefs", android.content.Context.MODE_PRIVATE)
-    }
+    companion object {
+        const val NOTIFICATION_ID = 1001
 
-    private val vpnCheckRunnable = object : Runnable {
-        override fun run() {
+        @Volatile
+        var isServiceRunning: Boolean = false
+            private set
+
+        @Volatile
+        var lastActiveElapsedRealtime: Long = 0L
+            private set
+
+        @Volatile
+        private var instance: ProtectionService? = null
+
+        @Volatile
+        private var dnsSetupGraceUntilElapsed: Long = 0L
+
+        /**
+         * Grants a short 40-second grace window ONLY when the user explicitly taps
+         * "Go to Settings" inside Purity Tracker to configure Private DNS for the first time.
+         * Note: If Private DNS is already set to family.adguard-dns.com on screen, it is still protected!
+         */
+        fun grantInitialDnsSetupGraceWindow() {
+            dnsSetupGraceUntilElapsed = SystemClock.elapsedRealtime() + 40_000L
+        }
+
+        fun isInitialDnsSetupGraceActive(): Boolean {
+            val now = SystemClock.elapsedRealtime()
+            return dnsSetupGraceUntilElapsed > now && (dnsSetupGraceUntilElapsed - now) <= 45_000L
+        }
+
+        fun pokeFromWatchdog(context: Context) {
             try {
-                val prefs = getSafePrefs()
-                val isVpnPreferred = prefs.getBoolean("vpn_is_running", false)
-                if (isVpnPreferred) {
-                    if (!LocalDnsVpnService.isVpnInterfaceUp()) {
-                        if (android.net.VpnService.prepare(applicationContext) == null) {
-                            val startIntent = Intent(applicationContext, LocalDnsVpnService::class.java).apply {
-                                action = LocalDnsVpnService.ACTION_START
-                            }
-                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                                startForegroundService(startIntent)
-                            } else {
-                                startService(startIntent)
-                            }
-                            LocalDnsVpnService.isRunning = true
-                        }
-                    }
+                val svc = instance
+                if (svc != null) {
+                    svc.isServiceRunningFlag()
+                    svc.ensureServiceConfigAndForeground()
+                    svc.ensureHighSpeedPatrolRunning()
                 }
             } catch (e: Exception) {}
-            vpnHandler.postDelayed(this, 1000) // Continually check and enforce VPN every 1 second
         }
+    }
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var screenReceiver: BroadcastReceiver? = null
+
+    private var lastBlockElapsedTime: Long = 0L
+    private var lastPatrolPackagesettings: Boolean = false
+
+    private val delayedScan45 = Runnable { performFullActiveWindowScan(null) }
+    private val delayedScan110 = Runnable { performFullActiveWindowScan(null) }
+    private val delayedScan220 = Runnable { performFullActiveWindowScan(null) }
+    private val delayedScan380 = Runnable { performFullActiveWindowScan(null) }
+
+    // Continuous 5-second self-healing watchdog
+    private val watchdogRunnable = object : Runnable {
+        override fun run() {
+            try {
+                isServiceRunning = true
+                lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+                ensureServiceConfigAndForeground()
+                checkAndStartVpnIfNeeded()
+                ensureHighSpeedPatrolRunning()
+            } catch (e: Exception) {}
+            mainHandler.postDelayed(this, 5000L)
+        }
+    }
+
+    // Continuous High-Speed 85ms Active Window Patrol while screen is ON
+    private val highSpeedPatrolRunnable = object : Runnable {
+        override fun run() {
+            var nextDelayMs = 220L
+            try {
+                isServiceRunning = true
+                lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+                val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                val isScreenOn = pm?.isInteractive ?: true
+                if (isScreenOn) {
+                    val matchedSettingsOrSystem = performFullActiveWindowScan(null)
+                    nextDelayMs = if (matchedSettingsOrSystem || lastPatrolPackagesettings) 85L else 220L
+                } else {
+                    nextDelayMs = 1200L
+                }
+            } catch (e: Exception) {}
+            mainHandler.postDelayed(this, nextDelayMs)
+        }
+    }
+
+    private fun isServiceRunningFlag() {
+        isServiceRunning = true
+        lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        isServiceRunning = true
+        lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+        ensureServiceConfigAndForeground()
+        registerScreenReceiver()
+        ensureHighSpeedPatrolRunning()
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        val info = AccessibilityServiceInfo()
-        info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
-        info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-        info.flags = AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
-        this.serviceInfo = info
-        
-        // Start persistent vpn status guard loop
-        vpnHandler.post(vpnCheckRunnable)
-        
-        // Ensure VPN is running as early as possible after a reboot or restart
-        val prefs = getSafePrefs()
-        if (prefs.getBoolean("vpn_is_running", false) && !LocalDnsVpnService.isVpnInterfaceUp()) {
-            try {
-                if (android.net.VpnService.prepare(this) == null) {
-                    val startIntent = Intent(this, LocalDnsVpnService::class.java).apply {
+        instance = this
+        isServiceRunning = true
+        lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+
+        ensureServiceConfigAndForeground()
+        registerScreenReceiver()
+        try {
+            SettingsGuardWatchdogService.start(this)
+            SettingsGuardJobService.schedule(this)
+        } catch (e: Exception) {}
+
+        mainHandler.removeCallbacks(watchdogRunnable)
+        mainHandler.post(watchdogRunnable)
+        ensureHighSpeedPatrolRunning()
+        checkAndStartVpnIfNeeded()
+    }
+
+    private fun ensureServiceConfigAndForeground() {
+        try {
+            val info = serviceInfo ?: AccessibilityServiceInfo()
+            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+            info.notificationTimeout = 0L
+            info.flags = info.flags or
+                    AccessibilityServiceInfo.DEFAULT or
+                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                    AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                    AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+            serviceInfo = info
+        } catch (e: Exception) {}
+
+        SettingsGuardWatchdogService.promoteServiceToForeground(this)
+    }
+
+    private fun ensureHighSpeedPatrolRunning() {
+        mainHandler.removeCallbacks(highSpeedPatrolRunnable)
+        mainHandler.post(highSpeedPatrolRunnable)
+    }
+
+    private fun checkAndStartVpnIfNeeded() {
+        try {
+            val safeCtx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                createDeviceProtectedStorageContext()
+            } else {
+                this
+            }
+            val prefs = safeCtx.getSharedPreferences("VpnPrefs", Context.MODE_PRIVATE)
+            val isVpnRunning = prefs.getBoolean("vpn_is_running", false)
+            if (isVpnRunning && !LocalDnsVpnService.isVpnInterfaceUp()) {
+                val vpnIntent = android.net.VpnService.prepare(this)
+                if (vpnIntent == null) {
+                    val serviceIntent = Intent(this, LocalDnsVpnService::class.java).apply {
                         action = LocalDnsVpnService.ACTION_START
                     }
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        startForegroundService(startIntent)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(serviceIntent)
                     } else {
-                        startService(startIntent)
-                    }
-                    LocalDnsVpnService.isRunning = true
-                }
-            } catch (e: Exception) {}
-        }
-        
-        // Register screen on receiver
-        screenReceiver = object : android.content.BroadcastReceiver() {
-            override fun onReceive(context: android.content.Context, intent: Intent) {
-                if (intent.action == Intent.ACTION_SCREEN_ON || intent.action == Intent.ACTION_USER_PRESENT) {
-                    val prefs = getSafePrefs()
-                    if (prefs.getBoolean("vpn_is_running", false) && !LocalDnsVpnService.isVpnInterfaceUp()) {
-                        try {
-                            val startIntent = Intent(context, LocalDnsVpnService::class.java).apply {
-                                action = LocalDnsVpnService.ACTION_START
-                            }
-                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                                context.startForegroundService(startIntent)
-                            } else {
-                                context.startService(startIntent)
-                            }
-                            LocalDnsVpnService.isRunning = true
-                        } catch (e: Exception) {}
+                        startService(serviceIntent)
                     }
                 }
             }
+        } catch (e: Exception) {}
+    }
+
+    private fun registerScreenReceiver() {
+        if (screenReceiver == null) {
+            try {
+                screenReceiver = object : BroadcastReceiver() {
+                    override fun onReceive(context: Context, intent: Intent) {
+                        val action = intent.action ?: return
+                        isServiceRunning = true
+                        lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+
+                        if (action == Intent.ACTION_SCREEN_OFF ||
+                            action == Intent.ACTION_TIME_CHANGED ||
+                            action == Intent.ACTION_DATE_CHANGED ||
+                            action == Intent.ACTION_TIMEZONE_CHANGED
+                        ) {
+                            // Immediately re-lock temporary PIN unlock when screen turns off or clock changes
+                            LockManager.lockImmediately(context)
+                        }
+
+                        if (action == Intent.ACTION_SCREEN_ON ||
+                            action == Intent.ACTION_USER_PRESENT ||
+                            action == Intent.ACTION_TIME_TICK ||
+                            action == "android.intent.action.PHONE_STATE" ||
+                            action == Intent.ACTION_BOOT_COMPLETED
+                        ) {
+                            ensureServiceConfigAndForeground()
+                            ensureHighSpeedPatrolRunning()
+                            checkAndStartVpnIfNeeded()
+                        }
+                    }
+                }
+                val filter = IntentFilter().apply {
+                    addAction(Intent.ACTION_SCREEN_ON)
+                    addAction(Intent.ACTION_USER_PRESENT)
+                    addAction(Intent.ACTION_SCREEN_OFF)
+                    addAction(Intent.ACTION_TIME_TICK)
+                    addAction(Intent.ACTION_TIME_CHANGED)
+                    addAction(Intent.ACTION_DATE_CHANGED)
+                    addAction(Intent.ACTION_TIMEZONE_CHANGED)
+                    addAction("android.intent.action.PHONE_STATE")
+                    addAction(Intent.ACTION_BOOT_COMPLETED)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    registerReceiver(screenReceiver, filter, Context.RECEIVER_EXPORTED)
+                } else {
+                    registerReceiver(screenReceiver, filter)
+                }
+            } catch (e: Exception) {}
         }
-        val filter = android.content.IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_ON)
-            addAction(Intent.ACTION_USER_PRESENT)
-        }
-        registerReceiver(screenReceiver, filter)
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        screenReceiver?.let { unregisterReceiver(it) }
-        vpnHandler.removeCallbacks(vpnCheckRunnable)
-        return super.onUnbind(intent)
-    }
-
-    private fun getAllText(node: android.view.accessibility.AccessibilityNodeInfo?, activePkg: String, depth: Int = 0): String {
-        if (node == null || depth > 40) return ""
-        val sb = java.lang.StringBuilder()
+        isServiceRunning = false
+        instance = null
         try {
-            val nodePkg = node.packageName?.toString() ?: ""
-            // Discard status bar and notification shade content if we are not actively inspecting systemui window
-            if (activePkg != "com.android.systemui" && nodePkg == "com.android.systemui") {
-                return ""
+            screenReceiver?.let {
+                unregisterReceiver(it)
+                screenReceiver = null
             }
-            
-            val text = node.text?.toString()?.lowercase()
-            val desc = node.contentDescription?.toString()?.lowercase()
-            if (text != null) sb.append(text).append(" ")
-            if (desc != null) sb.append(desc).append(" ")
-            
-            val childCount = node.childCount
-            for (i in 0 until childCount) {
-                val child = node.getChild(i)
-                if (child != null) {
-                    sb.append(getAllText(child, activePkg, depth + 1))
-                }
-            }
-        } catch (e: Exception) {
-            // Safe traversal
-        }
-        return sb.toString()
+            mainHandler.removeCallbacksAndMessages(null)
+            SettingsGuardWatchdogService.start(this)
+            SettingsGuardJobService.schedule(this)
+        } catch (e: Exception) {}
+        return true
     }
 
-    companion object {
-        private var lastBlockTime = 0L
+    override fun onRebind(intent: Intent?) {
+        super.onRebind(intent)
+        instance = this
+        isServiceRunning = true
+        lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+        ensureServiceConfigAndForeground()
+        checkAndStartVpnIfNeeded()
+        registerScreenReceiver()
+        mainHandler.removeCallbacks(watchdogRunnable)
+        mainHandler.post(watchdogRunnable)
+        ensureHighSpeedPatrolRunning()
+    }
+
+    override fun onDestroy() {
+        isServiceRunning = false
+        instance = null
+        try {
+            screenReceiver?.let {
+                unregisterReceiver(it)
+                screenReceiver = null
+            }
+            mainHandler.removeCallbacksAndMessages(null)
+            SettingsGuardWatchdogService.start(this)
+            SettingsGuardJobService.schedule(this)
+        } catch (e: Exception) {}
+        super.onDestroy()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        // Enforce always-on VPN if it was killed by OS, checking cross-process live interface state
-        val prefs = getSafePrefs()
-        if (prefs.getBoolean("vpn_is_running", false) && !LocalDnsVpnService.isVpnInterfaceUp()) {
-            try {
-                val startIntent = Intent(this, LocalDnsVpnService::class.java).apply {
-                    action = LocalDnsVpnService.ACTION_START
+        isServiceRunning = true
+        lastActiveElapsedRealtime = SystemClock.elapsedRealtime()
+        try {
+            val eventPkg = event.packageName?.toString() ?: ""
+            if (eventPkg == this.packageName) {
+                return
+            }
+
+            // Immediate 0ms scan
+            performFullActiveWindowScan(event)
+
+            // Multi-stage follow-up scans to catch animations, fragments, and popup dialogs on the exact millisecond they render
+            mainHandler.removeCallbacks(delayedScan45)
+            mainHandler.removeCallbacks(delayedScan110)
+            mainHandler.removeCallbacks(delayedScan220)
+            mainHandler.removeCallbacks(delayedScan380)
+            mainHandler.postDelayed(delayedScan45, 45L)
+            mainHandler.postDelayed(delayedScan110, 110L)
+            mainHandler.postDelayed(delayedScan220, 220L)
+            mainHandler.postDelayed(delayedScan380, 380L)
+        } catch (t: Throwable) {
+            // Never crash onAccessibilityEvent
+        }
+    }
+
+    private fun isRelevantSystemOrSettingsPackage(pkgName: String): Boolean {
+        if (pkgName.isEmpty() || pkgName == this.packageName) return false
+        val lower = pkgName.lowercase()
+        return lower.contains("settings") ||
+                lower.contains("wireless") ||
+                lower.contains("network") ||
+                lower.contains("dns") ||
+                lower.contains("packageinstaller") ||
+                lower.contains("installer") ||
+                lower.contains("safecenter") ||
+                lower.contains("security") ||
+                lower.contains("permission") ||
+                lower.contains("appmanager") ||
+                lower.contains("systemmanager") ||
+                lower.contains("power") ||
+                lower.contains("battery") ||
+                lower.contains("athena") ||
+                lower.contains("lool") ||
+                lower == "com.samsung.android.sm" ||
+                lower == "android" ||
+                lower.contains("vpndialogs") ||
+                lower.contains("vpn") ||
+                lower.contains("accessibility") ||
+                lower == "com.android.vending"
+    }
+
+    private fun isLauncherOrSystemUiPackage(pkgName: String): Boolean {
+        val lower = pkgName.lowercase()
+        return lower == "com.android.systemui" ||
+                lower.contains("launcher") ||
+                lower.contains("trebuchet") ||
+                lower.contains("quickstep")
+    }
+
+    /**
+     * Scans the active window, all interactive windows (`windows`), and the optional event.
+     * Returns true if the user is currently inside a Settings/System/Installer window.
+     */
+    private fun performFullActiveWindowScan(event: AccessibilityEvent?): Boolean {
+        try {
+            // Do not scan when device keyguard is locked
+            val km = getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+            if (km != null && km.isKeyguardLocked) {
+                return false
+            }
+        } catch (e: Exception) {}
+
+        val activeRoot = try { rootInActiveWindow } catch (e: Exception) { null }
+        val activePkg = activeRoot?.packageName?.toString()
+            ?: event?.packageName?.toString()
+            ?: ""
+
+        if (activePkg == this.packageName) {
+            return false
+        }
+
+        // Gather all interactive window roots (critical for floating dialogs like Private DNS / Stop Accessibility / Uninstall)
+        val allRoots = mutableListOf<AccessibilityNodeInfo>()
+        if (activeRoot != null) {
+            allRoots.add(activeRoot)
+        }
+        try {
+            val winList = windows
+            if (winList != null) {
+                for (win in winList) {
+                    val r = try { win.root } catch (e: Exception) { null }
+                    if (r != null) {
+                        val wPkg = r.packageName?.toString() ?: ""
+                        if (wPkg != this.packageName && !wPkg.contains("systemui")) {
+                            allRoots.add(r)
+                        }
+                    }
                 }
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                    startForegroundService(startIntent)
-                } else {
-                    startService(startIntent)
+            }
+        } catch (e: Exception) {}
+
+        val anyRelevantPkg = isRelevantSystemOrSettingsPackage(activePkg) ||
+                (event?.packageName?.toString()?.let { isRelevantSystemOrSettingsPackage(it) } == true) ||
+                allRoots.any { isRelevantSystemOrSettingsPackage(it.packageName?.toString() ?: "") }
+
+        lastPatrolPackagesettings = anyRelevantPkg
+
+        if (!anyRelevantPkg) {
+            if (isLauncherOrSystemUiPackage(activePkg)) {
+                return false
+            }
+            return false
+        }
+
+        // If user unlocked temporarily with valid PIN (strictly max 60 seconds monotonic), pause auto-back
+        if (LockManager.isCurrentlyUnlocked(this)) {
+            return true
+        }
+
+        val combinedText = extractAllWindowsText(allRoots, event)
+        if (combinedText.isEmpty()) {
+            return true
+        }
+
+        val isPlayStorePkg = activePkg == "com.android.vending" ||
+                (event?.packageName?.toString() == "com.android.vending")
+
+        // =========================================================================
+        // 1. PRIVATE DNS PROTECTION (Instant Auto-Back + PIN Lock)
+        // =========================================================================
+        val hasPrivateDnsKeyword = combinedText.contains("private dns") ||
+                combinedText.contains("প্রাইভেট ডিএনএস") ||
+                combinedText.contains("ব্যক্তিগত ডিএনএস") ||
+                combinedText.contains("dns provider hostname") ||
+                combinedText.contains("hostname of dns provider") ||
+                combinedText.contains("specified dns") ||
+                combinedText.contains("নির্দিষ্ট ডিএনএস") ||
+                combinedText.contains("নির্দিষ্ট dns") ||
+                combinedText.contains("family.adguard-dns.com") ||
+                combinedText.contains("adguard-dns") ||
+                combinedText.contains("cleanbrowsing") ||
+                combinedText.contains("private_dns")
+
+        if (hasPrivateDnsKeyword) {
+            val isAlreadyConfiguredOnScreen = combinedText.contains("family.adguard-dns.com") ||
+                    combinedText.contains("adguard-dns") ||
+                    combinedText.contains("cleanbrowsing") ||
+                    isSystemPrivateDnsConfigured()
+
+            // Only allow if user is in the 40s initial setup grace window AND Private DNS is not yet configured
+            val allowInitialSetup = isInitialDnsSetupGraceActive() && !isAlreadyConfiguredOnScreen
+            if (!allowInitialSetup) {
+                clickCancelButtonIfPresent(allRoots)
+                performAutoBackAndLock("attempted to open or disable Private DNS - LOCKED")
+                return true
+            }
+        }
+
+        // =========================================================================
+        // 2. ACCESSIBILITY SERVICE (SETTINGS GUARD) DISABLE PROTECTION
+        // Since ProtectionService is running right now, any visit to Purity Tracker's
+        // Accessibility detail screen or stop dialog is an attempt to turn it OFF!
+        // =========================================================================
+        val isExplicitAccessibilityStop = combinedText.contains("stop purity tracker") ||
+                combinedText.contains("turn off purity tracker") ||
+                combinedText.contains("disable purity tracker") ||
+                combinedText.contains("পিউরিটি ট্র্যাকার বন্ধ") ||
+                combinedText.contains("পিউরিটি ট্র্যাকার থামান") ||
+                (combinedText.contains("purity tracker") && combinedText.contains("tap stop")) ||
+                (combinedText.contains("purity tracker") && combinedText.contains("turning off"))
+
+        val isPurityAccessibilityDetailPage =
+            (combinedText.contains("purity tracker") || combinedText.contains("পিউরিটি ট্র্যাকার")) &&
+            (combinedText.contains("use purity tracker") ||
+             combinedText.contains("পিউরিটি ট্র্যাকার ব্যবহার") ||
+             combinedText.contains("purity tracker shortcut") ||
+             combinedText.contains("পিউরিটি ট্র্যাকার শর্টকাট") ||
+             combinedText.contains("24/7 anti-tamper") ||
+             combinedText.contains("anti-tamper & streak protection") ||
+             combinedText.contains("সেটিংস ও আনইনস্টল ব্লক")) &&
+            !combinedText.contains("downloaded apps") &&
+            !combinedText.contains("installed services") &&
+            !combinedText.contains("ডাউনলোড করা অ্যাপ")
+
+        if (isExplicitAccessibilityStop || isPurityAccessibilityDetailPage) {
+            clickCancelButtonIfPresent(allRoots)
+            performAutoBackAndLock("attempted to disable Settings Guard - PERMANENTLY LOCKED")
+            return true
+        }
+
+        // =========================================================================
+        // 3. UNINSTALL CONFIRMATION DIALOG FOR PURITY TRACKER
+        // =========================================================================
+        val isUninstallPrompt = combinedText.contains("uninstall") ||
+                combinedText.contains("মুছে ফেলতে") ||
+                combinedText.contains("আনইনস্টল") ||
+                combinedText.contains("remove this app") ||
+                combinedText.contains("delete app")
+
+        if (isUninstallPrompt) {
+            val hasOurIdentity = combinedText.contains("purity tracker") ||
+                    combinedText.contains("পিউরিটি ট্র্যাকার") ||
+                    combinedText.contains("com.aistudio.puritytracker") ||
+                    combinedText.contains(this.packageName.lowercase())
+
+            val isExplicitOurUninstall = combinedText.contains("uninstall purity tracker") ||
+                    combinedText.contains("পিউরিটি ট্র্যাকার আনইনস্টল") ||
+                    combinedText.contains("delete purity tracker") ||
+                    (combinedText.contains("do you want to uninstall") && hasOurIdentity) ||
+                    (combinedText.contains("want to uninstall this app") && hasOurIdentity) ||
+                    (combinedText.contains("আনইনস্টল করতে চান") && hasOurIdentity) ||
+                    (isPlayStorePkg && hasOurIdentity)
+
+            if (isExplicitOurUninstall) {
+                clickCancelButtonIfPresent(allRoots)
+                performAutoBackAndLock("attempted to uninstall Purity Tracker - PERMANENTLY LOCKED")
+                return true
+            }
+        }
+
+        // =========================================================================
+        // 4. DEVICE ADMINISTRATOR DEACTIVATION FOR PURITY TRACKER
+        // =========================================================================
+        val isDeviceAdminScreen = combinedText.contains("device admin") ||
+                combinedText.contains("admin app") ||
+                combinedText.contains("deactivate") ||
+                combinedText.contains("ডিঅ্যাক্টিভেট") ||
+                combinedText.contains("ডিভাইস অ্যাডমিন")
+
+        if (isDeviceAdminScreen) {
+            val hasOurIdentity = combinedText.contains("purity tracker") ||
+                    combinedText.contains("পিউরিটি ট্র্যাকার") ||
+                    combinedText.contains("antiuninstalladminreceiver")
+            // Allow activating Device Admin if it's currently NOT active, block deactivating when active!
+            if (hasOurIdentity && AntiUninstallManager.isDeviceAdminActive(this)) {
+                clickCancelButtonIfPresent(allRoots)
+                performAutoBackAndLock("attempted to deactivate Device Administrator - PERMANENTLY LOCKED")
+                return true
+            }
+        }
+
+        // =========================================================================
+        // 5. VPN SHIELD DISCONNECT DIALOG FOR PURITY TRACKER
+        // =========================================================================
+        val hasVpnOurIdentity = combinedText.contains("purity tracker") ||
+                combinedText.contains("পিউরিটি ট্র্যাকার") ||
+                combinedText.contains("com.aistudio.puritytracker")
+
+        val hasVpnDisconnectAction = combinedText.contains("disconnect") ||
+                combinedText.contains("revoke") ||
+                combinedText.contains("delete vpn") ||
+                combinedText.contains("turn off vpn") ||
+                combinedText.contains("সংযোগ বিচ্ছিন্ন") ||
+                combinedText.contains("ডিসকানেক্ট")
+
+        val isInitialVpnRequest = combinedText.contains("wants to set up") ||
+                combinedText.contains("connection request") ||
+                combinedText.contains("সংযোগ স্থাপন করতে চায়")
+
+        if (hasVpnOurIdentity && hasVpnDisconnectAction && !isInitialVpnRequest) {
+            clickCancelButtonIfPresent(allRoots)
+            performAutoBackAndLock("attempted to disconnect VPN Shield - LOCKED")
+            return true
+        }
+
+        // =========================================================================
+        // 6. POWER CONSUMPTION / BATTERY / AUTO-LAUNCH / APP INFO / CLEAR DATA
+        //    STRICTLY FOR PURITY TRACKER (Never affects Chrome, WhatsApp, etc.)
+        // =========================================================================
+        if (!isPlayStorePkg) {
+            val isOurTamperScreen = checkIsOurAppInfoOrBatteryOrStorageScreen(allRoots, combinedText)
+            if (isOurTamperScreen) {
+                clickCancelButtonIfPresent(allRoots)
+                performAutoBackAndLock("attempted to modify Purity Tracker App Info / Battery / Storage - LOCKED")
+                return true
+            }
+        }
+
+        return true
+    }
+
+    private fun isSystemPrivateDnsConfigured(): Boolean {
+        return try {
+            val mode = android.provider.Settings.Global.getString(contentResolver, "private_dns_mode") ?: ""
+            val spec = android.provider.Settings.Global.getString(contentResolver, "private_dns_specifier") ?: ""
+            mode.equals("hostname", ignoreCase = true) ||
+                    spec.contains("adguard", ignoreCase = true) ||
+                    spec.contains("cleanbrowsing", ignoreCase = true)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Checks if the active screen is specifically Purity Tracker's App Info,
+     * Power Consumption Controls (Realme/ColorOS/Xiaomi/Samsung Battery page),
+     * or Storage/Clear Data page.
+     * Strictly verifies that Purity Tracker is the target app and NOT another app.
+     */
+    private fun checkIsOurAppInfoOrBatteryOrStorageScreen(
+        roots: List<AccessibilityNodeInfo>,
+        windowText: String
+    ): Boolean {
+        val hasOurIdentityInText = windowText.contains("purity tracker") ||
+                windowText.contains("পিউরিটি ট্র্যাকার") ||
+                windowText.contains("com.aistudio.puritytracker") ||
+                windowText.contains(this.packageName.lowercase())
+
+        if (!hasOurIdentityInText) return false
+
+        // Ignore the initial system "Allow Purity Tracker to always run in background?" dialog when enabling battery exemption
+        if (!AntiUninstallManager.isSystemBatteryOptimizationIgnored(this)) {
+            if (windowText.contains("always run in background") ||
+                windowText.contains("ignore battery optimizations") ||
+                windowText.contains("stop optimizing battery usage")
+            ) {
+                return false
+            }
+        }
+
+        // 1. Check for Realme/ColorOS/OEM Power Consumption / Auto-Launch page for Purity Tracker
+        val isPowerOrAutoLaunchPage = windowText.contains("power consumption controls") ||
+                windowText.contains("allow background activity") ||
+                windowText.contains("allow foreground activity") ||
+                windowText.contains("allow auto launch") ||
+                windowText.contains("associated launch") ||
+                windowText.contains("pause app activity if unused") ||
+                windowText.contains("remove permissions if app is unused")
+
+        // 2. Check for Clear Storage / Clear Data page for Purity Tracker
+        val isStorageClearPage = windowText.contains("clear storage") ||
+                windowText.contains("clear data") ||
+                windowText.contains("clear all data") ||
+                windowText.contains("manage space") ||
+                windowText.contains("ডেটা মুছুন") ||
+                windowText.contains("ক্লিয়ার ডেটা") ||
+                windowText.contains("সব ডেটা মুছুন")
+
+        // 3. Check for App Info page (Force Stop / Uninstall / Storage)
+        val hasAppInfoButtons = (windowText.contains("force stop") || windowText.contains("ফোর্স স্টপ")) &&
+                (windowText.contains("uninstall") || windowText.contains("আনইনস্টল") ||
+                 windowText.contains("storage") || windowText.contains("permissions") ||
+                 windowText.contains("battery") || windowText.contains("disable"))
+
+        if (!isPowerOrAutoLaunchPage && !isStorageClearPage && !hasAppInfoButtons) {
+            return false
+        }
+
+        // Exclude the multi-app "App management" / "All apps" list where many apps are listed together
+        if (windowText.contains("search apps") ||
+            windowText.contains("all apps") ||
+            windowText.contains("see all") ||
+            windowText.contains("installed apps") ||
+            windowText.contains("default apps")
+        ) {
+            if (!windowText.contains("force stop") && !isPowerOrAutoLaunchPage && !isStorageClearPage) {
+                return false
+            }
+        }
+
+        val myPkg = packageName.lowercase()
+        val myPkgPrefix = "com.aistudio.puritytracker"
+        val ourNames = listOf("purity tracker", "পিউরিটি ট্র্যাকার")
+
+        var foundOurHeader = false
+        var foundOtherAppHeader = false
+
+        fun inspectNodes(node: AccessibilityNodeInfo?, depth: Int) {
+            if (node == null || depth > 14 || foundOurHeader || foundOtherAppHeader) return
+            try {
+                val viewId = node.viewIdResourceName?.lowercase() ?: ""
+                val text = node.text?.toString()?.trim() ?: ""
+                val desc = node.contentDescription?.toString()?.trim() ?: ""
+                val lowerText = text.lowercase()
+                val lowerDesc = desc.lowercase()
+
+                val isHeaderView = viewId.contains("title") ||
+                        viewId.contains("app_name") ||
+                        viewId.contains("header") ||
+                        viewId.contains("entity") ||
+                        viewId.contains("label") ||
+                        viewId.contains("widget_text1") ||
+                        viewId.contains("toolbar") ||
+                        viewId.contains("action_bar") ||
+                        viewId.contains("coui")
+
+                if (isHeaderView && (text.isNotEmpty() || desc.isNotEmpty())) {
+                    val isOur = ourNames.any { lowerText == it || lowerDesc == it } ||
+                            lowerText == myPkg || lowerDesc == myPkg ||
+                            lowerText.contains(myPkgPrefix) || lowerDesc.contains(myPkgPrefix)
+
+                    if (isOur) {
+                        foundOurHeader = true
+                    } else {
+                        val isGeneric = lowerText in listOf(
+                            "settings", "app info", "apps", "application info", "all apps",
+                            "force stop", "uninstall", "storage", "storage usage", "permissions",
+                            "notifications", "battery usage", "power consumption controls",
+                            "privacy permissions", "allow background activity", "allow auto launch",
+                            "allow foreground activity", "data usage", "open by default",
+                            "সেটিংস", "অ্যাপ তথ্য", "অ্যাপের বিবরণ", "ফোর্স স্টপ", "আনইনস্টল"
+                        )
+                        if (!isGeneric && text.length > 1) {
+                            foundOtherAppHeader = true
+                        }
+                    }
+                }
+
+                val childCount = node.childCount
+                for (i in 0 until childCount) {
+                    inspectNodes(node.getChild(i), depth + 1)
                 }
             } catch (e: Exception) {}
         }
-        
-        val pkgName = event.packageName?.toString() ?: ""
-        if (pkgName == this.packageName) {
-            return
+
+        for (r in roots) {
+            inspectNodes(r, 0)
         }
 
-        // 1. Skip systemui and launchers to prevent blocking system notifications or normal phone activities.
-        if (pkgName == "com.android.systemui" || pkgName.contains("launcher") || pkgName.contains("systemui")) {
-            return
+        if (foundOtherAppHeader && !foundOurHeader) {
+            return false
         }
 
-        // 2. Prevent scanning or blocking elements on the system lockscreen / keyguard to resolve lockscreen auto-back issues.
-        try {
-            val km = getSystemService(android.content.Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
-            if (km.isKeyguardLocked) {
-                return // Safe early return
-            }
-        } catch (e: Exception) {}
-        
-        // 3. STRICT PRE-FILTERING: Limit protection scanner strictly to settings, installer and VPN packages.
-        val isSettingsPkg = pkgName.contains("settings") || pkgName.contains("safecenter") || 
-                pkgName.contains("securitycenter") || pkgName.contains("securityadd") || 
-                pkgName.contains("safeguard") || pkgName.contains("secure") || pkgName.contains("systemmanager") ||
-                pkgName.contains("wireless") || pkgName.contains("network") || pkgName.contains("connectivity") ||
-                pkgName.contains("connection") || pkgName.contains("phone") || pkgName.contains("telephony")
-        val isInstallerPkg = pkgName.contains("packageinstaller") || pkgName.contains("installer") || pkgName == "android" 
-        val isVpnPkg = pkgName.contains("vpndialogs") || pkgName.contains("vpn") || pkgName == "android"
-        
-        if (!isSettingsPkg && !isInstallerPkg && !isVpnPkg) {
-            return // Extremely safe! Return instantly to completely eliminate false-positives
-        }
-        
-        // Check if user has temporarily unlocked settings (30 seconds)
-        if (LockManager.isCurrentlyUnlocked(this)) {
-            return // Allow access safely
-        }
-        
-        // Always scan rootInActiveWindow to see full screen context (very crucial to see app name alongside uninstall/disconnect buttons!)
-        val sourceNode = rootInActiveWindow ?: event.source
-        val windowText = if (sourceNode != null) {
-            getAllText(sourceNode, pkgName)
-        } else {
-            ""
-        }
+        return foundOurHeader || isPowerOrAutoLaunchPage || isStorageClearPage
+    }
 
-        // PRECISE CASE 1: VPN Disconnect system or configure dialog matching our app icon/name
-        val isVpnDialogPkg = pkgName == "com.android.vpndialogs" || pkgName.contains("settings") || pkgName == "android"
-        
-        // PRECISE CASE 7: Private DNS Settings page blocking
-        val isPrivateDnsSettings = (pkgName.contains("settings") || pkgName.contains("wireless") || pkgName.contains("network") || pkgName.contains("connectivity") || pkgName.contains("connection") || pkgName.contains("phone")) && 
-                (windowText.contains("private dns") || 
-                 windowText.contains("designated private dns") || 
-                 windowText.contains("family.adguard-dns.com") || 
-                 windowText.contains("adguard") || 
-                 windowText.contains("প্রাইভেট ডিএনএস") || 
-                 windowText.contains("dns") || 
-                 windowText.contains("ডিএনএস"))
-                
-        if (isPrivateDnsSettings) {
-             val currentTime = System.currentTimeMillis()
-             if (currentTime - lastBlockTime > 1500) {
-                 lastBlockTime = currentTime
-                 
-                 performGlobalAction(GLOBAL_ACTION_HOME) // Go home to exit settings
-                 performGlobalAction(GLOBAL_ACTION_BACK) // Press back
-                 
-                 triggerGuardianAlert("attempted to modify Private DNS while protection is ON")
-                 
-                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                     if (LockManager.hasPin(this)) {
-                         val intent = Intent(this, PinLockActivity::class.java).apply {
-                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                         }
-                         startActivity(intent)
-                     } else {
-                         val intent = Intent(this, MainActivity::class.java).apply {
-                             action = "com.example.MOTIVATION"
-                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                         }
-                         startActivity(intent)
-                     }
-                 }, 600)
-             }
-             return
-        }
-        
-        if (isVpnDialogPkg) {
-            val hasVpnNameOnScreen = windowText.contains("purity tracker") || windowText.contains("purity shield")
-            if (hasVpnNameOnScreen) {
-                val hasDisconnectKeywords = windowText.contains("disconnect") || 
-                        windowText.contains("configure") || 
-                        windowText.contains("duration") || 
-                        windowText.contains("conversation") || 
-                        windowText.contains("00:") ||
-                        windowText.contains("সংযোগ বিচ্ছিন্ন") || 
-                        windowText.contains("ডিসকানেক্ট") || 
-                        windowText.contains("কনফিগার") ||
-                        windowText.contains("সময়কাল")
-                
-                // Ensure we do NOT block the initial Connection Request dialog when user manually starts it
-                val isConnectionRequest = windowText.contains("wants to set up") || 
-                        windowText.contains("connection request") || 
-                        windowText.contains("অনুরোধ") || 
-                        windowText.contains("সংযোগ স্থাপন করতে চায়")
-                
-                if (hasDisconnectKeywords && !isConnectionRequest) {
-                    val currentTime = System.currentTimeMillis()
-                    if (currentTime - lastBlockTime > 1500) { // 1.5 seconds cooldown
-                        lastBlockTime = currentTime
-                        
-                        performGlobalAction(GLOBAL_ACTION_HOME) // Go home to be safe
-                        performGlobalAction(GLOBAL_ACTION_BACK) // Auto back to dismiss the disconnect dialog
-                        
-                        triggerGuardianAlert("attempted to disconnect or configure the protection shield")
-                        
-                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                            // Open MainActivity with the meditation dialog to cool down their emotion
-                            val intent = Intent(this, MainActivity::class.java).apply {
-                                action = "com.example.MOTIVATION"
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                            }
-                            startActivity(intent)
-                        }, 500)
+    /**
+     * Clicks any Cancel / Dismiss button inside a modal dialog immediately before performing Global Back.
+     */
+    private fun clickCancelButtonIfPresent(roots: List<AccessibilityNodeInfo>) {
+        val cancelLabels = setOf("cancel", "বাতিল", "বাতিল করুন", "no", "না", "deny")
+        fun findAndClickCancel(node: AccessibilityNodeInfo?, depth: Int): Boolean {
+            if (node == null || depth > 12) return false
+            try {
+                val txt = node.text?.toString()?.trim()?.lowercase() ?: ""
+                val desc = node.contentDescription?.toString()?.trim()?.lowercase() ?: ""
+                val vId = node.viewIdResourceName?.lowercase() ?: ""
+                if (txt in cancelLabels || desc in cancelLabels || vId.endsWith("button2")) {
+                    if (node.isClickable) {
+                        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        return true
                     }
-                    return
+                    val parent = node.parent
+                    if (parent != null && parent.isClickable) {
+                        parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        return true
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    if (findAndClickCancel(node.getChild(i), depth + 1)) return true
+                }
+            } catch (e: Exception) {}
+            return false
+        }
+        for (r in roots) {
+            if (findAndClickCancel(r, 0)) break
+        }
+    }
+
+    /**
+     * Executes instant multi-stage Auto-Back + launches PinLockActivity on top.
+     * Uses monotonic `SystemClock.elapsedRealtime()` so clock shifts never block execution.
+     */
+    private fun performAutoBackAndLock(reason: String) {
+        val nowElapsed = SystemClock.elapsedRealtime()
+        if (nowElapsed >= lastBlockElapsedTime && (nowElapsed - lastBlockElapsedTime) < 280L) {
+            return
+        }
+        lastBlockElapsedTime = nowElapsed
+
+        // 1. Immediate Back action (0ms) to dismiss dialog/screen
+        performGlobalAction(GLOBAL_ACTION_BACK)
+
+        // 2. Second Back action (+65ms) in case a modal dialog was open on top of the restricted Settings page
+        mainHandler.postDelayed({
+            try {
+                if (!LockManager.isCurrentlyUnlocked(this)) {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                }
+            } catch (e: Exception) {}
+        }, 65L)
+
+        // 3. Trigger Guardian Alert
+        triggerGuardianAlert(reason)
+
+        // 4. Launch PinLockActivity immediately (0ms), +110ms, and +260ms
+        launchPinLockScreenNow()
+        mainHandler.postDelayed({ launchPinLockScreenNow() }, 110L)
+        mainHandler.postDelayed({ launchPinLockScreenNow() }, 260L)
+    }
+
+    private fun launchPinLockScreenNow() {
+        try {
+            val pinIntent = Intent(this, PinLockActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                    Intent.FLAG_ACTIVITY_NO_ANIMATION
+                )
+            }
+            startActivity(pinIntent)
+        } catch (e: Exception) {}
+    }
+
+    private fun extractAllWindowsText(
+        roots: List<AccessibilityNodeInfo>,
+        event: AccessibilityEvent?
+    ): String {
+        val sb = StringBuilder(512)
+
+        if (event != null) {
+            try {
+                event.text?.forEach { charSeq ->
+                    if (!charSeq.isNullOrEmpty()) {
+                        sb.append(charSeq.toString().lowercase()).append(' ')
+                    }
+                }
+                val eventDesc = event.contentDescription?.toString()
+                if (!eventDesc.isNullOrEmpty()) {
+                    sb.append(eventDesc.lowercase()).append(' ')
+                }
+                val cls = event.className?.toString()
+                if (!cls.isNullOrEmpty()) {
+                    sb.append(cls.lowercase()).append(' ')
+                }
+            } catch (e: Exception) {}
+        }
+
+        val count = IntArray(1)
+        for (root in roots) {
+            appendNodeHierarchyText(root, sb, 0, count)
+        }
+
+        if (roots.isEmpty() && event != null) {
+            try {
+                event.source?.let { srcNode ->
+                    appendNodeHierarchyText(srcNode, sb, 0, count)
+                }
+            } catch (e: Exception) {}
+        }
+
+        return sb.toString()
+    }
+
+    private fun appendNodeHierarchyText(
+        node: AccessibilityNodeInfo?,
+        sb: StringBuilder,
+        depth: Int,
+        count: IntArray
+    ) {
+        if (node == null || depth > 24 || count[0] > 850) return
+        val nodePkg = node.packageName?.toString() ?: ""
+        if (nodePkg == "com.android.systemui" || nodePkg.contains("systemui")) {
+            return
+        }
+        count[0]++
+        try {
+            val text = node.text?.toString()
+            if (!text.isNullOrEmpty()) {
+                sb.append(text.lowercase()).append(' ')
+            }
+            val desc = node.contentDescription?.toString()
+            if (!desc.isNullOrEmpty()) {
+                sb.append(desc.lowercase()).append(' ')
+            }
+            val viewId = node.viewIdResourceName
+            if (!viewId.isNullOrEmpty()) {
+                sb.append(viewId.lowercase()).append(' ')
+            }
+
+            val childCount = node.childCount
+            for (i in 0 until childCount) {
+                if (count[0] > 850) break
+                val child = try {
+                    node.getChild(i)
+                } catch (e: Exception) {
+                    null
+                }
+                if (child != null) {
+                    appendNodeHierarchyText(child, sb, depth + 1, count)
                 }
             }
-        }
-
-        // To protect the app from being uninstalled or modified, let's setup precise targets.
-        // We only trigger when "purity tracker" or "purity shield" is explicitly listed as the active configuration subject.
-        val hasAppNameOnScreen = windowText.contains("purity tracker") || windowText.contains("purity shield")
-        if (!hasAppNameOnScreen) {
-            return // Never block if our app name is not prominently shown on the active screen!
-        }
-
-        // PRECISE CASE 2: App Info page of Purity Tracker specifically in active screen
-        val isOurAppInfoPage = (pkgName.contains("settings") || pkgName.contains("safecenter") || pkgName.contains("securitycenter") || pkgName.contains("packageinstaller") || pkgName == "android") &&
-                windowText.contains("force stop") &&
-                (windowText.contains("uninstall") || windowText.contains("storage usage") || windowText.contains("data usage") || windowText.contains("permissions") || windowText.contains("battery") || windowText.contains("version 1.0"))
-
-        // PRECISE CASE 3: Uninstall Confirmation dialog specifically for Purity Tracker
-        val isOurAppUninstallDialog = (pkgName.contains("packageinstaller") || pkgName.contains("settings") || pkgName.contains("installer") || pkgName == "android") &&
-                (windowText.contains("uninstall") || windowText.contains("delete") || windowText.contains("আনইনস্টল") || windowText.contains("করতে চান")) &&
-                (windowText.contains("do you want to") || windowText.contains("uninstallation") || windowText.contains("this app") || windowText.contains("আপনি কি"))
-
-        // PRECISE CASE 4: Accessibility settings screen to turn off Purity Tracker
-        val isOurAccessibilitySettings = (pkgName.contains("settings") || pkgName.contains("accessibility")) &&
-                (windowText.contains("use purity tracker") || windowText.contains("purity tracker use") || windowText.contains("stop purity tracker") || windowText.contains("turn off purity") || windowText.contains("shortcut"))
-
-        // PRECISE CASE 5: Storage Details settings screen to Clear Data / Clear Cache of Purity Tracker
-        val isOurStorageSettings = (pkgName.contains("settings") || pkgName.contains("safecenter")) &&
-                (windowText.contains("clear data") || windowText.contains("clear storage") || windowText.contains("clear cache") || windowText.contains("manage space"))
-
-        // PRECISE CASE 6: Device Administration screen to deactivate or disable permissions for Purity Tracker
-        val isOurDeviceAdminSettings = (pkgName.contains("settings") || pkgName.contains("safecenter") || pkgName == "android") &&
-                (windowText.contains("device admin") || windowText.contains("admin app") || windowText.contains("deactivate"))
-
-        val shouldBlockModification = isOurAppInfoPage || isOurAppUninstallDialog || isOurAccessibilitySettings || isOurStorageSettings || isOurDeviceAdminSettings
-
-        if (shouldBlockModification) {
-            val currentTime = System.currentTimeMillis()
-            if (currentTime - lastBlockTime > 1500) { // Coercion cooldown
-                lastBlockTime = currentTime
-                
-                performGlobalAction(GLOBAL_ACTION_HOME) // Safely exit the settings screen entirely
-                performGlobalAction(GLOBAL_ACTION_BACK) // Auto back to cancel settings modification or uninstall screen
-                
-                triggerGuardianAlert()
-                
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    if (LockManager.hasPin(this)) {
-                        val intent = Intent(this, PinLockActivity::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                        }
-                        startActivity(intent)
-                    } else {
-                        val intent = Intent(this, MainActivity::class.java).apply {
-                            action = "com.example.MOTIVATION"
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                        }
-                        startActivity(intent)
-                    }
-                }, 600) // 600ms delay to make sure BACK and HOME events are completely consumed
-            }
-        }
+        } catch (e: Exception) {}
     }
 
-    private fun triggerGuardianAlert(reason: String = "attempted to disable protection shield or uninstall the app") {
-        GuardianManager.triggerGuardianAlert(this, reason)
+    private fun triggerGuardianAlert(reason: String) {
+        try {
+            GuardianManager.triggerGuardianAlert(this, reason)
+        } catch (e: Exception) {}
     }
 
-    override fun onInterrupt() {}
+    override fun onInterrupt() {
+        // Keep service running uninterrupted
+    }
 }

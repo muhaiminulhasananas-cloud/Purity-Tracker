@@ -98,6 +98,7 @@ data class ChatMessage(
     val text: String,
     val isUser: Boolean,
     val isLiked: Boolean? = null,
+    val isFavorite: Boolean = false,
     val isStreaming: Boolean = false
 )
 
@@ -105,7 +106,7 @@ class AiViewModel(application: android.app.Application) : androidx.lifecycle.And
     private val _messages = MutableStateFlow<List<ChatMessage>>(
         listOf(
             ChatMessage(
-                text = "আসসালামু আলাইকুম ওয়া রাহমাতুল্লাহ! আমি আপনার ইসলামিক কাউনসিলর এবং আসক্তি নিরাময় সঙ্গী। আমি আপনাকে খারাপ অভ্যাস, পর্নোগ্রাফি এবং নেতিবাচক চিন্তার ফাঁদ থেকে মুক্ত হয়ে একটি পবিত্র, সচেতন এবং আধ্যাত্মিক জীবন গড়ে তুলতে সাহায্য করার জন্য ও আপনার রুকইয়াহ্ হিসেবে নির্দেশনা দিতে নিয়োজিত রয়েছি ইনশাআল্লাহ। আপনার যেকোনো মানসিক বা আত্মিক অনুভূতি কোনো দ্বিধা ছাড়াই সরাসরি লিখে শেয়ার করতে পারেন, যা সম্পূর্ণভাবে গোপন থাকবে।",
+                text = "আসসালামু আলাইকুম! আমি 'নূর AI' — আপনার আত্মশুদ্ধি, দ্বীনি জিজ্ঞাসা ও আসক্তি নিরাময় সহচর। যেকোনো প্রশ্ন বা সমস্যা নির্দ্বিধায় লিখুন, সরাসরি সমাধান পাবেন ইনশাআল্লাহ।",
                 isUser = false
             )
         )
@@ -114,6 +115,16 @@ class AiViewModel(application: android.app.Application) : androidx.lifecycle.And
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading = _isLoading.asStateFlow()
+
+    fun toggleFavorite(targetMsg: ChatMessage) {
+        _messages.value = _messages.value.map { msg ->
+            if (msg.id == targetMsg.id) {
+                msg.copy(isFavorite = !msg.isFavorite)
+            } else {
+                msg
+            }
+        }
+    }
 
     fun toggleLike(messageId: String, isLike: Boolean) {
         _messages.value = _messages.value.map { msg ->
@@ -158,12 +169,24 @@ class AiViewModel(application: android.app.Application) : androidx.lifecycle.And
                 return@launch
             }
 
+            val systemInstructionText = """
+                You are 'Noor AI' (নূর AI) — a wise, empathetic, direct, and concise Islamic counselor, habit recovery assistant, and spiritual companion.
+
+                CRITICAL INSTRUCTIONS:
+                1. ANSWER DIRECTLY: Answer EXACTLY what the user asks without unnecessary preamble, long greetings, repetitive apologies, or unsolicited disclaimers. Get straight to the core answer in your very first sentence.
+                2. NO EXTRA FLUFF (কোনো বাড়তি অপ্রয়োজনীয় কথা নয়): Do not ramble or add repetitive filler sentences. Provide sharp, precise, and practical answers.
+                3. CLEAR & STRUCTURED: Use bullet points, bold key concepts, or brief paragraphs so the user gets actionable insights instantly.
+                4. AUTHENTIC ISLAMIC & SCIENTIFIC GUIDANCE: When asked about overcoming bad habits (e.g. pornography, lustful thoughts, masturbation, screen addiction), salah, repentance, duas, or mental peace, provide authentic Islamic principles (Quran & Sunnah) combined with proven behavioral psychology steps concisely.
+                5. STRICT LANGUAGE MATCH: Always answer in the EXACT SAME language the user asked in. If the user asks in Bengali (বাংলা), respond in clean, natural, and standard Bengali. If in English, respond in English.
+                6. TONE: Respectful, compassionate, encouraging, and razor-sharp focused on solving the user's question.
+            """.trimIndent()
+
             val request = GenerateContentRequest(
                 contents = listOf(Content(
                     parts = listOf(Part(text = prompt))
                 )),
                 systemInstruction = Content(
-                    parts = listOf(Part(text = "You are an Islamic counselor and addiction recovery companion. Your goal is to help users overcome bad habits, pornography, and negative thoughts, and guide them towards a pure, conscious, and spiritual life. You should answer in the SAME language the user uses to ask the question (e.g. if they ask in Bengali, reply in Bengali). Keep responses compassionate, encouraging, and based on Islamic principles."))
+                    parts = listOf(Part(text = systemInstructionText))
                 )
             )
 
@@ -267,7 +290,7 @@ class AiViewModel(application: android.app.Application) : androidx.lifecycle.And
             } catch (e: Exception) {
                 _isLoading.value = false
                 _messages.value = _messages.value + ChatMessage(
-                    text = "${LanguageStore.get("ai_connection_error")} (${e.localizedMessage})",
+                    text = LanguageStore.get("ai_connection_error"),
                     isUser = false
                 )
             }

@@ -1,4 +1,5 @@
 import java.io.File
+import java.util.zip.ZipFile
 
 plugins {
   alias(libs.plugins.android.application)
@@ -18,8 +19,8 @@ android {
     applicationId = "com.aistudio.puritytracker.abcxyz"
     minSdk = 24
     targetSdk = 36
-    versionCode = 15
-    versionName = "1.1.5"
+    versionCode = 20
+    versionName = "1.2.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -59,6 +60,9 @@ android {
     compose = true
     buildConfig = true
   }
+  androidResources {
+    noCompress += listOf("mp3", "ogg", "wav")
+  }
   testOptions { unitTests { isIncludeAndroidResources = true } }
 }
 
@@ -85,7 +89,7 @@ dependencies {
   // implementation(libs.androidx.camera.lifecycle)
   // implementation(libs.androidx.camera.view)
   implementation(libs.androidx.compose.material.icons.core)
-  implementation(libs.androidx.compose.material.icons.extended)
+  // implementation(libs.androidx.compose.material.icons.extended)
   implementation(libs.androidx.compose.material3)
   implementation("androidx.compose.material:material:1.6.0")
   implementation(libs.androidx.compose.ui)
@@ -102,7 +106,7 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
-  implementation(libs.converter.moshi)
+  // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   implementation(libs.firebase.auth)
   implementation(libs.androidx.credentials)
@@ -110,13 +114,11 @@ dependencies {
   implementation(libs.googleid)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
-  implementation(libs.logging.interceptor)
-  implementation(libs.moshi.kotlin)
-  implementation(libs.okhttp)
+  // implementation(libs.logging.interceptor)
+  // implementation(libs.moshi.kotlin)
   implementation(libs.play.services.location)
   implementation(libs.play.services.ads)
   implementation(libs.canhub.image.cropper)
-  implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
@@ -134,41 +136,53 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
-  "ksp"(libs.moshi.kotlin.codegen)
+  // "ksp"(libs.moshi.kotlin.codegen)
 }
 
 tasks.register("copyApks") {
-    doNotTrackState("Just simple copying")
-    val appDir = project.projectDir
+    doNotTrackState("Always copy fresh APKs")
     val rootDir = project.rootDir
+    val actualBuildDir = layout.buildDirectory.asFile.get()
     doLast {
-        val localApk = File(appDir, "build/outputs/apk/debug/app-debug.apk")
+        val buildDirApk = File(actualBuildDir, "outputs/apk/debug/app-debug.apk")
         val platformApk = File(rootDir, ".build-outputs/app-debug.apk")
-        
-        val target1 = File(rootDir, "PurityTracker.apk")
-        val target2 = File(rootDir, "PurityTracker_Glass.apk")
-        val target3 = File(rootDir, "App-Download-Here.apk")
-        
-        if (localApk.exists()) {
-            localApk.copyTo(target1, overwrite = true)
-            localApk.copyTo(target2, overwrite = true)
-            localApk.copyTo(target3, overwrite = true)
-            println("APK files successfully copied from local build path!")
-        } else if (platformApk.exists()) {
-            platformApk.copyTo(target1, overwrite = true)
-            platformApk.copyTo(target2, overwrite = true)
-            platformApk.copyTo(target3, overwrite = true)
-            println("APK files successfully copied from platform build output (.build-outputs)!")
+
+        val sourceApk = if (buildDirApk.exists() && buildDirApk.length() > 0L) {
+            buildDirApk
+        } else if (platformApk.exists() && platformApk.length() > 0L) {
+            platformApk
         } else {
-            println("Source APK not found at standard path")
+            null
+        }
+
+        if (sourceApk != null) {
+            val targets = listOf(
+                File(rootDir, "PurityTracker.apk"),
+                File(rootDir, "PurityTracker_Glass.apk"),
+                File(rootDir, "App-Download-Here.apk"),
+                platformApk
+            )
+            targets.forEach { target ->
+                if (target.absolutePath != sourceApk.absolutePath) {
+                    target.parentFile?.mkdirs()
+                    sourceApk.copyTo(target, overwrite = true)
+                }
+            }
+            println("APK files successfully copied and synced from ${sourceApk.absolutePath} (${sourceApk.length()} bytes)!")
+        } else {
+            println("Source APK not found at any path")
         }
     }
 }
 
 tasks.configureEach {
-    if (name == "assembleDebug") {
+    if (name == "compileDebugKotlin") {
+        finalizedBy("packageDebug")
+    }
+    if (name == "assembleDebug" || name == "packageDebug") {
         finalizedBy("copyApks")
     }
 }
+
 
 

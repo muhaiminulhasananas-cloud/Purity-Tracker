@@ -1,1 +1,0 @@
-                              val isCommenterPremium2 = comment.isPremium || comment.userEmail == "muhaiminulhasananas@gmail.com" || comment.name.contains("Anas", ignoreCase = true) || comment.name.contains("Muhai", ignoreCase = true)

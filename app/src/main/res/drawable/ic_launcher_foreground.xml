@@ -3,13 +3,30 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
     <group
-        android:scaleX="2.75"
-        android:scaleY="2.75"
-        android:translateX="21"
-        android:translateY="21">
+        android:pivotX="54"
+        android:pivotY="54">
+
+        <!-- 1. Top Slash Stripe (Sky Blue #22A0DB) -->
         <path
-            android:fillColor="#00E5FF"
-            android:pathData="M12,1L3,5v6c0,5.55 3.84,10.74 9,12c5.16,-1.26 9,-6.45 9,-12V5L12,1zM11,7h2v2h-2V7zM11,11h2v6h-2v-6z" />
+            android:fillColor="#22A0DB"
+            android:pathData="M 27,30 C 42,22 62,23 80,31 C 74,33 64,35 56,36 C 44,37 34,39 26,40 C 26,36.5 26.5,33 27,30 Z" />
+
+        <!-- 2. Middle Slash Stripe (Sky Blue #22A0DB) -->
+        <path
+            android:fillColor="#22A0DB"
+            android:pathData="M 26.5,45 C 38,39 53,39 72,42 C 65,44 55,46 47,48 C 39,50 33,53 28.5,55 C 27.5,51.5 27,48 26.5,45 Z" />
+
+        <!-- 3. Bottom Slash Stripe (Sky Blue #22A0DB) -->
+        <path
+            android:fillColor="#22A0DB"
+            android:pathData="M 30,60 C 39,53 49,52 64,53 C 58,55 51,57 44,60 C 39,63 35,66 36,69 C 33.5,66 31.5,63 30,60 Z" />
+
+        <!-- 4. Dark Petrol Shield V-Frame (#163B4E) -->
+        <path
+            android:fillColor="#163B4E"
+            android:pathData="M 80,31 C 81,47 77,63 68,73 C 63,79 57,83 54,84 C 51,83 45,79 40,73.5 L 44.5,69.5 C 48,74 52,77.5 54,78 C 56,77.5 61,73.5 64.5,68.5 C 72,59 74.5,47 74.5,34 Z" />
+
     </group>
 </vector>

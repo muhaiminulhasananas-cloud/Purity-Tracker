@@ -12,10 +12,21 @@
 #   public *;
 #}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Fast tree-shaking for unused material-icons-extended classes without obfuscation or optimization
+-dontobfuscate
+-dontoptimize
+-dontpreverify
+-dontwarn **
+-ignorewarnings
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+-keepattributes *Annotation*,InnerClasses,EnclosingMethod,Signature,SourceFile,LineNumberTable
+
+-keep class com.example.** { *; }
+-keep interface com.example.** { *; }
+-keep enum com.example.** { *; }
+
+-keep class com.google.firebase.** { *; }
+-keep class com.google.android.gms.** { *; }
+-keep class kotlinx.serialization.** { *; }
+-keep class androidx.room.** { *; }
+

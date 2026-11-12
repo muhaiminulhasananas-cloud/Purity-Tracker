@@ -66,4 +66,98 @@ object PremiumManager {
                 .apply()
         }
     }
+
+    data class PremiumTimeInfo(
+        val isPremium: Boolean,
+        val isLifetime: Boolean,
+        val daysLeft: Long,
+        val hoursLeft: Long,
+        val minsLeft: Long,
+        val isExpiringSoon: Boolean,
+        val formattedExpiryDate: String,
+        val displayTextBn: String,
+        val displayTextEn: String
+    )
+
+    fun getPremiumTimeInfo(isPremium: Boolean, expiryTimestamp: Long): PremiumTimeInfo {
+        if (!isPremium) {
+            return PremiumTimeInfo(
+                isPremium = false,
+                isLifetime = false,
+                daysLeft = 0,
+                hoursLeft = 0,
+                minsLeft = 0,
+                isExpiringSoon = false,
+                formattedExpiryDate = "",
+                displayTextBn = "ফ্রি মোড",
+                displayTextEn = "Free Mode"
+            )
+        }
+
+        val now = System.currentTimeMillis()
+        if (expiryTimestamp <= 0L || (expiryTimestamp - now) > 3650L * 24 * 60 * 60 * 1000L) {
+            return PremiumTimeInfo(
+                isPremium = true,
+                isLifetime = true,
+                daysLeft = 9999,
+                hoursLeft = 9999,
+                minsLeft = 9999,
+                isExpiringSoon = false,
+                formattedExpiryDate = "Lifetime",
+                displayTextBn = "👑 আজীবন প্রো মেম্বারশিপ সক্রিয়",
+                displayTextEn = "👑 Lifetime Pro Membership Active"
+            )
+        }
+
+        val diffMs = expiryTimestamp - now
+        if (diffMs <= 0L) {
+            return PremiumTimeInfo(
+                isPremium = false,
+                isLifetime = false,
+                daysLeft = 0,
+                hoursLeft = 0,
+                minsLeft = 0,
+                isExpiringSoon = false,
+                formattedExpiryDate = "",
+                displayTextBn = "মেয়াদ শেষ হয়েছে",
+                displayTextEn = "Subscription Expired"
+            )
+        }
+
+        val daysLeft = diffMs / (24 * 60 * 60 * 1000L)
+        val hoursLeft = (diffMs % (24 * 60 * 60 * 1000L)) / (60 * 60 * 1000L)
+        val minsLeft = (diffMs % (60 * 60 * 1000L)) / (60 * 1000L)
+        val sdf = java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale.getDefault())
+        val expiryDateStr = try {
+            sdf.format(java.util.Date(expiryTimestamp))
+        } catch (e: Exception) {
+            ""
+        }
+
+        val isExpiringSoon = daysLeft <= 3
+
+        val bnText = when {
+            isExpiringSoon && daysLeft == 0L -> "⚠️ মেয়াদের বাকি মাত্র $hoursLeft ঘণ্টা $minsLeft মিনিট (শেষ: $expiryDateStr)"
+            isExpiringSoon -> "⚠️ মেয়াদের বাকি মাত্র $daysLeft দিন (মেয়াদ শেষ: $expiryDateStr)"
+            else -> "👑 প্রো অ্যাক্টিভ (বাকি আছে: $daysLeft দিন / মেয়াদ: $expiryDateStr)"
+        }
+
+        val enText = when {
+            isExpiringSoon && daysLeft == 0L -> "⚠️ Expiring in $hoursLeft hours $minsLeft mins (Expires: $expiryDateStr)"
+            isExpiringSoon -> "⚠️ Expiring in $daysLeft days (Expires: $expiryDateStr)"
+            else -> "👑 Pro Active ($daysLeft days remaining / Expires: $expiryDateStr)"
+        }
+
+        return PremiumTimeInfo(
+            isPremium = true,
+            isLifetime = false,
+            daysLeft = daysLeft,
+            hoursLeft = hoursLeft,
+            minsLeft = minsLeft,
+            isExpiringSoon = isExpiringSoon,
+            formattedExpiryDate = expiryDateStr,
+            displayTextBn = bnText,
+            displayTextEn = enText
+        )
+    }
 }

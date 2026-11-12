@@ -105,26 +105,13 @@ class LocalDnsVpnService : VpnService() {
             val prefs = getSafePrefs()
             prefs.edit().putBoolean("vpn_is_running", true).apply()
 
-            // START FOREGROUND NOTIFICATION
-            val channelId = "vpn_active_guard"
-            val nm = getSystemService(android.app.NotificationManager::class.java)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                val channel = android.app.NotificationChannel(channelId, "Active Protection", android.app.NotificationManager.IMPORTANCE_LOW)
-                nm.createNotificationChannel(channel)
-            }
-            val notif = androidx.core.app.NotificationCompat.Builder(this, channelId)
-                .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
-                .setContentTitle("Guardian Shield is Active")
-                .setContentText("Your internet is protected. Tap to meditate for 15 minutes.")
-                .setContentIntent(pendingIntent)
-                .setOngoing(true)
-                .build()
-                
-            if (android.os.Build.VERSION.SDK_INT >= 34) {
-                startForeground(1, notif, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-            } else {
-                startForeground(1, notif)
-            }
+            try {
+                val nm = getSystemService(android.app.NotificationManager::class.java)
+                nm?.cancel(1)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    nm?.deleteNotificationChannel("vpn_active_guard")
+                }
+            } catch (e: Exception) {}
 
             Log.d("VPN_SERVICE", "VPN Started Successfully (Lightweight DNS Mode)")
         } catch (e: Exception) {
@@ -164,7 +151,9 @@ class LocalDnsVpnService : VpnService() {
             val intent = Intent()
             val pi = android.app.PendingIntent.getActivity(this, 100, intent, android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE)
             val notif = androidx.core.app.NotificationCompat.Builder(this, channelId)
-                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setSmallIcon(R.drawable.ic_notification_logo)
+                .setColor(0xFF0284C7.toInt())
+                .setLargeIcon(NotificationHelper.getAppLogoBitmap(this))
                 .setContentTitle("শিল্ড ব্যাকগ্রাউন্ডে চলছে!")
                 .setContentText("আপনি VPN বন্ধ করার চেষ্টা করেছেন, কিন্তু শিল্ড ব্যাকগ্রাউন্ডে পুনরায় চালু হয়েছে।")
                 .setContentIntent(pi)
@@ -184,11 +173,9 @@ class LocalDnsVpnService : VpnService() {
             val restartIntent = Intent(this, LocalDnsVpnService::class.java).apply {
                 action = ACTION_START
             }
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                startForegroundService(restartIntent)
-            } else {
+            try {
                 startService(restartIntent)
-            }
+            } catch (e: Exception) {}
         }
     }
 }

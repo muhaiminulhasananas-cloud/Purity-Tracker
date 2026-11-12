@@ -31,13 +31,28 @@ interface SessionHistoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertHistory(history: SessionHistory)
 
+    @Query("DELETE FROM session_history WHERE id = :id")
+    suspend fun deleteHistoryById(id: Int)
+
     @Query("DELETE FROM session_history")
     suspend fun deleteAllHistory()
 }
 
-@Database(entities = [SessionHistory::class], version = 1, exportSchema = false)
+@Database(
+    entities = [
+        SessionHistory::class,
+        WinterArcChallenge::class,
+        WinterArcWorkoutItem::class,
+        WinterArcDayTask::class,
+        WinterArcRunRecord::class,
+        WinterArcDayRecord::class
+    ],
+    version = 2,
+    exportSchema = false
+)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun sessionHistoryDao(): SessionHistoryDao
+    abstract fun winterArcDao(): WinterArcDao
 
     companion object {
         @Volatile
@@ -49,7 +64,9 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "app_database"
-                ).build()
+                )
+                    .fallbackToDestructiveMigration()
+                    .build()
                 INSTANCE = instance
                 instance
             }

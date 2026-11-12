@@ -40,10 +40,14 @@ data class Comment(
 data class LeaderboardUser(
     val id: String = "",
     val name: String = "",
+    val username: String = "",
+    val email: String = "",
     val streakMs: Long = 0,
     val timestamp: Long = System.currentTimeMillis(),
     val isPremium: Boolean = false,
-    val badge: String = ""
+    val badge: String = "",
+    val profilePicUrl: String = "",
+    val badgeImageUrl: String = ""
 )
 
 data class Challenge(
@@ -98,6 +102,7 @@ class CommunityViewModel : ViewModel() {
     val premiumUserEmails = _premiumUserEmails.asStateFlow()
 
     init {
+        AccountDeletionManager.cleanupOrphanedAndGhostAccounts()
         fetchPosts()
         fetchLeaderboard()
         fetchChallenges()
@@ -143,19 +148,67 @@ class CommunityViewModel : ViewModel() {
     private fun fetchLeaderboard() {
         db.collection("users")
             .orderBy("streakMs", Query.Direction.DESCENDING)
-            .limit(10)
+            .limit(50)
             .addSnapshotListener { snapshot, e ->
                 if (e != null) {
                     Log.w("CommunityViewModel", "Leaderboard Listen failed.", e)
                     return@addSnapshotListener
                 }
                 if (snapshot != null) {
-                    val leaderList = snapshot.documents.mapNotNull {
-                        it.toObject(LeaderboardUser::class.java)?.copy(id = it.id, isPremium = it.getBoolean("isPremium") ?: false)
-                    }
+                    val now = System.currentTimeMillis()
+                    val leaderList = snapshot.documents.mapNotNull { doc ->
+                        if (doc.getBoolean("isDeleted") == true) return@mapNotNull null
+                        val base = doc.toObject(LeaderboardUser::class.java) ?: return@mapNotNull null
+                        val email = doc.getString("email")?.trim() ?: ""
+                        val uname = doc.getString("username")?.trim() ?: ""
+                        val uName = doc.getString("name")?.trim() ?: ""
+                        if (email.isNotBlank() && !AccountDeletionManager.isValidRealEmail(email)) {
+                            return@mapNotNull null
+                        }
+                        if (email.isBlank() && uname.isBlank() && (uName.isBlank() || uName == "Anonymous Warrior")) {
+                            return@mapNotNull null
+                        }
+                        val photo = doc.getString("profilePicUrl") ?: doc.getString("photoUrl") ?: ""
+                        val badgeImg = doc.getString("badgeImageUrl") ?: ""
+                        
+                        // Live dynamic streak calculation:
+                        // Even if a user has not opened the app for days/weeks,
+                        // their streak advances in real-time as elapsed time passes!
+                        val elapsed = if (base.timestamp > 0 && now > base.timestamp) (now - base.timestamp) else 0L
+                        val realStreakMs = if (base.streakMs > 0) (base.streakMs + elapsed) else 0L
+
+                        base.copy(
+                            id = doc.id,
+                            username = uname,
+                            email = email,
+                            streakMs = realStreakMs,
+                            isPremium = doc.getBoolean("isPremium") ?: false,
+                            profilePicUrl = photo,
+                            badgeImageUrl = badgeImg
+                        )
+                    }.sortedByDescending { it.streakMs }.take(25)
+
                     _leaders.value = leaderList
                 }
             }
+    }
+
+    fun deleteUserCompletely(
+        userId: String,
+        username: String = "",
+        email: String = "",
+        onComplete: (Boolean, String?) -> Unit = { _, _ -> }
+    ) {
+        // Optimistically remove from UI lists right away
+        _leaders.value = _leaders.value.filter { it.id != userId }
+        _posts.value = _posts.value.filter { it.userId != userId && (email.isBlank() || it.userEmail != email) }
+        AccountDeletionManager.purgeUserCompletely(
+            userId = userId,
+            username = username,
+            email = email,
+            isSelfDelete = false,
+            onComplete = onComplete
+        )
     }
 
     private fun fetchChallenges() {
@@ -299,35 +352,49 @@ class CommunityViewModel : ViewModel() {
 
     fun syncUserStreak(streakMs: Long, badgeName: String = "New Warrior", badgeImageUrl: String = "") {
         val user = auth.currentUser
-        if (user != null) {
-            db.collection("users").document(user.uid).get().addOnSuccessListener { doc ->
-                val cloudStreakMs = doc.getLong("streakMs") ?: 0L
-                val cloudTimestamp = doc.getLong("timestamp") ?: 0L
-                val elapsed = System.currentTimeMillis() - cloudTimestamp
-                val realCloudStreak = cloudStreakMs + elapsed
-                
-                // If cloud is better than local by more than 5 minutes, DO NOT overwrite it.
-                // This prevents accidentally wiping the cloud streak when they just installed the app on a new device.
-                if (realCloudStreak > streakMs + 300000) {
-                     return@addOnSuccessListener
+        if (user != null && AccountDeletionManager.isUserVerified(user) && !UserPresenceManager.isDeletingAccount) {
+            db.collection("deleted_accounts").document(user.uid).get().addOnSuccessListener { deletedDoc ->
+                if (deletedDoc != null && deletedDoc.exists()) return@addOnSuccessListener
+                if (UserPresenceManager.isDeletingAccount) return@addOnSuccessListener
+
+                db.collection("users").document(user.uid).get().addOnSuccessListener { doc ->
+                    if (UserPresenceManager.isDeletingAccount) return@addOnSuccessListener
+                    if (doc.getBoolean("isDeleted") == true) return@addOnSuccessListener
+
+                    val cloudStreakMs = doc.getLong("streakMs") ?: 0L
+                    val cloudTimestamp = doc.getLong("timestamp") ?: 0L
+                    val elapsed = System.currentTimeMillis() - cloudTimestamp
+                    val realCloudStreak = cloudStreakMs + elapsed
+                    
+                    // If cloud is better than local by more than 5 minutes, DO NOT overwrite it.
+                    // This prevents accidentally wiping the cloud streak when they just installed the app on a new device.
+                    if (realCloudStreak > streakMs + 300000) {
+                         return@addOnSuccessListener
+                    }
+                    
+                    val cloudPremium = doc.getBoolean("isPremium") ?: false
+                    val isLocalPremium = PremiumManager.isPremium.value
+                    val finalPremium = cloudPremium || isLocalPremium
+                    
+                    val userRecord = mutableMapOf<String, Any>(
+                        "name" to (user.displayName ?: doc.getString("name") ?: "Warrior"),
+                        "email" to (user.email ?: ""),
+                        "streakMs" to streakMs,
+                        "timestamp" to System.currentTimeMillis(),
+                        "isPremium" to finalPremium,
+                        "badge" to badgeName
+                    )
+                    // If user doesn't have a profilePicUrl yet in Firestore but has photoUrl in Auth, save it
+                    val existingPhoto = doc.getString("profilePicUrl")
+                    if (existingPhoto.isNullOrEmpty() && user.photoUrl != null) {
+                        userRecord["profilePicUrl"] = user.photoUrl.toString()
+                    }
+                    // Do NOT overwrite profilePicUrl with badge. The user's profile photo is personal and permanent!
+                    if (badgeImageUrl.isNotEmpty()) {
+                        userRecord["badgeImageUrl"] = badgeImageUrl
+                    }
+                    db.collection("users").document(user.uid).set(userRecord, com.google.firebase.firestore.SetOptions.merge())
                 }
-                
-                val cloudPremium = doc.getBoolean("isPremium") ?: false
-                val isLocalPremium = PremiumManager.isPremium.value
-                val finalPremium = cloudPremium || isLocalPremium
-                
-                val userRecord = mutableMapOf<String, Any>(
-                    "name" to (user.displayName ?: "Anonymous Warrior"),
-                    "email" to (user.email ?: ""),
-                    "streakMs" to streakMs,
-                    "timestamp" to System.currentTimeMillis(),
-                    "isPremium" to finalPremium,
-                    "badge" to badgeName
-                )
-                if (badgeImageUrl.isNotEmpty()) {
-                    userRecord["profilePicUrl"] = badgeImageUrl
-                }
-                db.collection("users").document(user.uid).set(userRecord, com.google.firebase.firestore.SetOptions.merge())
             }
         }
     }
