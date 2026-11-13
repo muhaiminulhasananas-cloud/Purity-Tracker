@@ -161,13 +161,13 @@
 
         currentRequestType = existing?.fields?.requestType?.stringValue || currentRequestType;
 
-        // 2. Include token from URL in the PATCH body (field `token`)
-        const patchUrl = `${docUrl}?updateMask.fieldPaths=status&updateMask.fieldPaths=decidedAt&updateMask.fieldPaths=token`;
+        // 2. Include approvedByToken from URL in the PATCH body (field `approvedByToken`)
+        const patchUrl = `${docUrl}?updateMask.fieldPaths=status&updateMask.fieldPaths=decidedAt&updateMask.fieldPaths=approvedByToken`;
         const body = {
           fields: {
             status: { stringValue: newStatus },
             decidedAt: { integerValue: String(Date.now()) },
-            token: { stringValue: token }
+            approvedByToken: { stringValue: token }
           }
         };
 
