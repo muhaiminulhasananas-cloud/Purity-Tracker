@@ -66,10 +66,14 @@ fun BlockerScreen(
         onBack()
     }
 
-    // 1. Partner Email state
+    // 1. Partner Email state (locked once saved; changing requires current-partner approval)
     var savedPartnerEmail by remember { mutableStateOf(BlockerManager.getPartnerEmail(context)) }
-    var partnerEmailInput by remember { mutableStateOf(savedPartnerEmail) }
+    var partnerEmailInput by remember { mutableStateOf("") }
     var partnerEmailWarning by remember { mutableStateOf<String?>(null) }
+    var pendingPartnerChangeId by remember { mutableStateOf(BlockerManager.getPendingPartnerChangeRequestId(context)) }
+    var showChangePartnerDialog by remember { mutableStateOf(false) }
+    var isSendingPartnerChangeRequest by remember { mutableStateOf(false) }
+    var partnerChangeFeedbackBanner by remember { mutableStateOf<String?>(null) }
 
     // 2. PIN state (reusing existing LockManager)
     var hasPin by remember { mutableStateOf(LockManager.hasPin(context)) }
@@ -96,6 +100,7 @@ fun BlockerScreen(
         val states = withContext(Dispatchers.IO) {
             val pin = LockManager.hasPin(context)
             val partner = BlockerManager.getPartnerEmail(context)
+            val pendingPartnerChange = BlockerManager.getPendingPartnerChangeRequestId(context)
             val blocker = BlockerManager.isAdultBlockerEnabled(context)
             val pendingReq = BlockerManager.getPendingRequestId(context)
             val accAlive = AntiUninstallManager.isAccessibilityServiceAlive(context)
@@ -104,18 +109,19 @@ fun BlockerScreen(
             val autoStart = AntiUninstallManager.isOemAutoStartVisited(context)
             val admin = AntiUninstallManager.isDeviceAdminActive(context)
             GuardHealthWorker.checkNowAndNotify(context)
-            listOf(pin, partner, blocker, pendingReq, accAlive, accDead, battery, autoStart, admin)
+            listOf(pin, partner, pendingPartnerChange, blocker, pendingReq, accAlive, accDead, battery, autoStart, admin)
         }
         hasPin = states[0] as Boolean
         savedPartnerEmail = states[1] as String
-        isBlockerEnabled = states[2] as Boolean
-        pendingRequestId = states[3] as String?
-        val nowAccAlive = states[4] as Boolean
+        pendingPartnerChangeId = states[2] as String?
+        isBlockerEnabled = states[3] as Boolean
+        pendingRequestId = states[4] as String?
+        val nowAccAlive = states[5] as Boolean
         isAccessibilityAlive = nowAccAlive
-        isAccessibilityDeadButEnabled = states[5] as Boolean
-        isBatteryUnrestricted = states[6] as Boolean
-        isOemAutoStartOn = states[7] as Boolean
-        isDeviceAdminActive = states[8] as Boolean
+        isAccessibilityDeadButEnabled = states[6] as Boolean
+        isBatteryUnrestricted = states[7] as Boolean
+        isOemAutoStartOn = states[8] as Boolean
+        isDeviceAdminActive = states[9] as Boolean
 
         // If user tapped Switch ON while Accessibility was off and just returned after enabling Accessibility
         if (pendingTurnOnAfterAccessibility && nowAccAlive && hasPin && BlockerManager.hasValidPartnerEmail(context)) {
@@ -141,6 +147,18 @@ fun BlockerScreen(
                     requestFeedbackBanner = "Your partner denied the request. Blocker remains ON."
                 }
             }
+            BlockerManager.ensurePartnerChangeApprovalListener(context) { status ->
+                if (status == "approved") {
+                    savedPartnerEmail = ""
+                    partnerEmailInput = ""
+                    pendingPartnerChangeId = null
+                    partnerChangeFeedbackBanner = "Current partner approved the change. You may now enter a new partner email."
+                    Toast.makeText(context, "Partner approved: You can now enter a new partner email", Toast.LENGTH_LONG).show()
+                } else if (status == "denied") {
+                    pendingPartnerChangeId = null
+                    partnerChangeFeedbackBanner = "Your current partner denied the change request. Partner email remains locked."
+                }
+            }
             delay(1200L)
         }
     }
@@ -151,6 +169,7 @@ fun BlockerScreen(
             if (event == Lifecycle.Event.ON_RESUME) {
                 hasPin = LockManager.hasPin(context)
                 savedPartnerEmail = BlockerManager.getPartnerEmail(context)
+                pendingPartnerChangeId = BlockerManager.getPendingPartnerChangeRequestId(context)
                 isBlockerEnabled = BlockerManager.isAdultBlockerEnabled(context)
                 pendingRequestId = BlockerManager.getPendingRequestId(context)
                 isAccessibilityAlive = AntiUninstallManager.isAccessibilityServiceAlive(context)
@@ -269,86 +288,10 @@ fun BlockerScreen(
                     }
                 }
 
-                OutlinedTextField(
-                    value = partnerEmailInput,
-                    onValueChange = {
-                        partnerEmailInput = it
-                        partnerEmailWarning = null
-                    },
-                    label = { Text("Partner's Email Address") },
-                    placeholder = { Text("partner@example.com") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("partner_email_input"),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Color(0xFF38BDF8),
-                        unfocusedBorderColor = if (isLightMode) Color(0xFF94A3B8) else Color.White.copy(alpha = 0.28f),
-                        focusedTextColor = titleColor,
-                        unfocusedTextColor = titleColor,
-                        focusedLabelColor = Color(0xFF38BDF8),
-                        unfocusedLabelColor = descColor
-                    )
-                )
+                val isPartnerLocked = savedPartnerEmail.isNotBlank() && BlockerManager.hasValidPartnerEmail(context)
 
-                if (partnerEmailWarning != null) {
-                    Surface(
-                        color = Color(0xFFEF4444).copy(alpha = 0.14f),
-                        shape = RoundedCornerShape(10.dp),
-                        border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.45f)),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Warning,
-                                contentDescription = null,
-                                tint = Color(0xFFEF4444),
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = partnerEmailWarning!!,
-                                color = Color(0xFFFCA5A5),
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                    }
-                }
-
-                Button(
-                    onClick = {
-                        val err = BlockerManager.validateAndSavePartnerEmail(context, partnerEmailInput)
-                        if (err != null) {
-                            partnerEmailWarning = err
-                        } else {
-                            partnerEmailWarning = null
-                            savedPartnerEmail = BlockerManager.getPartnerEmail(context)
-                            partnerEmailInput = savedPartnerEmail
-                            Toast.makeText(context, "Partner email saved", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF38BDF8)),
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(44.dp)
-                        .testTag("save_partner_email_button")
-                ) {
-                    Text(
-                        text = "Save",
-                        color = Color(0xFF061018),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp
-                    )
-                }
-
-                if (savedPartnerEmail.isNotBlank() && BlockerManager.hasValidPartnerEmail(context)) {
+                if (isPartnerLocked) {
+                    // Read-only locked view: show "Partner active: <email>" with NO edit box
                     Surface(
                         color = Color(0xFF10B981).copy(alpha = 0.14f),
                         shape = RoundedCornerShape(10.dp),
@@ -358,24 +301,180 @@ fun BlockerScreen(
                             .testTag("partner_active_status")
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.CheckCircle,
+                                    contentDescription = null,
+                                    tint = Color(0xFF10B981),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Partner active: $savedPartnerEmail",
+                                    color = if (isLightMode) Color(0xFF065F46) else Color(0xFF34D399),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                             Icon(
-                                imageVector = Icons.Filled.CheckCircle,
-                                contentDescription = null,
-                                tint = Color(0xFF10B981),
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Partner active: $savedPartnerEmail",
-                                color = if (isLightMode) Color(0xFF065F46) else Color(0xFF34D399),
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
+                                imageVector = Icons.Filled.Lock,
+                                contentDescription = "Locked",
+                                tint = Color(0xFF34D399),
+                                modifier = Modifier.size(15.dp)
                             )
                         }
                     }
+
+                    if (!pendingPartnerChangeId.isNullOrBlank()) {
+                        Surface(
+                            color = Color(0xFFF59E0B).copy(alpha = 0.14f),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.45f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.HourglassTop,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFBBF24),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Partner change request sent to $savedPartnerEmail. Locked until your current partner clicks Approve in their email.",
+                                    color = if (isLightMode) Color(0xFF92400E) else Color(0xFFFDE68A),
+                                    fontSize = 11.5.sp,
+                                    lineHeight = 15.sp
+                                )
+                            }
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = { showChangePartnerDialog = true },
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.55f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color(0xFF38BDF8).copy(alpha = 0.1f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .testTag("request_partner_change_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Lock,
+                            contentDescription = null,
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Change / Remove Partner (Requires Partner Approval)",
+                            color = Color(0xFF38BDF8),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                } else {
+                    OutlinedTextField(
+                        value = partnerEmailInput,
+                        onValueChange = {
+                            partnerEmailInput = it
+                            partnerEmailWarning = null
+                        },
+                        label = { Text("Partner's Email Address") },
+                        placeholder = { Text("partner@example.com") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("partner_email_input"),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFF38BDF8),
+                            unfocusedBorderColor = if (isLightMode) Color(0xFF94A3B8) else Color.White.copy(alpha = 0.28f),
+                            focusedTextColor = titleColor,
+                            unfocusedTextColor = titleColor,
+                            focusedLabelColor = Color(0xFF38BDF8),
+                            unfocusedLabelColor = descColor
+                        )
+                    )
+
+                    if (partnerEmailWarning != null) {
+                        Surface(
+                            color = Color(0xFFEF4444).copy(alpha = 0.14f),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.45f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Warning,
+                                    contentDescription = null,
+                                    tint = Color(0xFFEF4444),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = partnerEmailWarning!!,
+                                    color = Color(0xFFFCA5A5),
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+
+                    Button(
+                        onClick = {
+                            val err = BlockerManager.validateAndSavePartnerEmail(context, partnerEmailInput)
+                            if (err != null) {
+                                partnerEmailWarning = err
+                            } else {
+                                partnerEmailWarning = null
+                                partnerChangeFeedbackBanner = null
+                                savedPartnerEmail = BlockerManager.getPartnerEmail(context)
+                                partnerEmailInput = ""
+                                Toast.makeText(context, "Partner email saved & locked", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF38BDF8)),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .testTag("save_partner_email_button")
+                    ) {
+                        Text(
+                            text = "Save",
+                            color = Color(0xFF061018),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+
+                if (partnerChangeFeedbackBanner != null) {
+                    Text(
+                        text = partnerChangeFeedbackBanner!!,
+                        color = Color(0xFF38BDF8),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
                 }
             }
         }
@@ -1043,6 +1142,92 @@ fun BlockerScreen(
                     modifier = Modifier.testTag("turn_off_send_request_button")
                 ) {
                     if (isSendingDisableRequest) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = Color(0xFF061018)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text(
+                        text = "Send Request",
+                        color = Color(0xFF061018),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        )
+    }
+
+    // =========================================================================
+    // DIALOG: Change / Remove Partner Email (Requires Current Partner Approval)
+    // =========================================================================
+    if (showChangePartnerDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!isSendingPartnerChangeRequest) {
+                    showChangePartnerDialog = false
+                }
+            },
+            containerColor = Color(0xFF0F172A),
+            titleContentColor = Color.White,
+            textContentColor = Color(0xFFCBD5E1),
+            title = {
+                Text(
+                    text = "Change Accountability Partner",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "A request will be sent to your accountability partner",
+                        fontSize = 14.5.sp,
+                        color = Color.White
+                    )
+                    if (savedPartnerEmail.isNotBlank()) {
+                        Text(
+                            text = "Current partner: $savedPartnerEmail",
+                            fontSize = 12.5.sp,
+                            color = Color(0xFF38BDF8),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    Text(
+                        text = "Your partner email is locked. You can only enter a new partner email after your current partner clicks Approve in the email.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showChangePartnerDialog = false },
+                    enabled = !isSendingPartnerChangeRequest,
+                    modifier = Modifier.testTag("change_partner_cancel_button")
+                ) {
+                    Text("Cancel", color = Color(0xFF94A3B8), fontWeight = FontWeight.SemiBold)
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        isSendingPartnerChangeRequest = true
+                        BlockerManager.sendPartnerChangeRequestToCurrentPartner(context) { _, message ->
+                            isSendingPartnerChangeRequest = false
+                            showChangePartnerDialog = false
+                            pendingPartnerChangeId = BlockerManager.getPendingPartnerChangeRequestId(context)
+                            partnerChangeFeedbackBanner = message
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        }
+                    },
+                    enabled = !isSendingPartnerChangeRequest,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF38BDF8)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.testTag("change_partner_send_request_button")
+                ) {
+                    if (isSendingPartnerChangeRequest) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp,

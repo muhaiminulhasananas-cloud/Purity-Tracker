@@ -8206,10 +8206,16 @@ fun ProfileScreen(
                          )
                      )
                      Spacer(modifier = Modifier.height(10.dp))
+                     val isGuardianEmailLocked = BlockerManager.hasValidPartnerEmail(context)
                      OutlinedTextField(
                          value = guardianEmail,
-                         onValueChange = { guardianEmail = it; sharedPref.edit().putString("guardianEmail", it).apply() },
-                         label = { Text(t("guardian_email")) },
+                         onValueChange = {
+                             if (!isGuardianEmailLocked) {
+                                 guardianEmail = it
+                             }
+                         },
+                         readOnly = isGuardianEmailLocked,
+                         label = { Text(if (isGuardianEmailLocked) "${t("guardian_email")} (Locked 🔒)" else t("guardian_email")) },
                          modifier = Modifier.fillMaxWidth(),
                          colors = OutlinedTextFieldDefaults.colors(
                              unfocusedBorderColor = if (isLightMode) Color(0xFFCBD5E1) else Color.Gray,
@@ -8282,10 +8288,16 @@ fun ProfileScreen(
                              if (userName.isBlank() || guardianName.isBlank() || guardianEmail.isBlank()) {
                                  android.widget.Toast.makeText(context, t("fill_required_fields"), android.widget.Toast.LENGTH_SHORT).show()
                              } else {
+                                 if (!BlockerManager.hasValidPartnerEmail(context)) {
+                                     val err = BlockerManager.validateAndSavePartnerEmail(context, guardianEmail)
+                                     if (err != null) {
+                                         android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_LONG).show()
+                                         return@Button
+                                     }
+                                 }
                                  sharedPref.edit().apply {
                                      putString("userName", userName)
                                      putString("guardianName", guardianName)
-                                     putString("guardianEmail", guardianEmail)
                                      putString("guardianPhone", guardianPhone)
                                      putBoolean("isShieldActive", isShieldActive)
                                  }.apply()

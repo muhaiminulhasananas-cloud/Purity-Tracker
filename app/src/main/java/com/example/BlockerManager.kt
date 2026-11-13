@@ -11,12 +11,16 @@ import com.google.firebase.firestore.ListenerRegistration
 import java.util.UUID
 
 /**
- * Manages the BlockerHero-style Simple Blocker (v1.3.0):
+ * Manages the BlockerHero-style Simple Blocker (v1.3.1):
  * 1. Accountability Partner email (stored in GuardianPrefs & mirrored to device-protected BlockerPrefs).
- *    Strictly rejects the user's own account email.
+ *    - Strictly rejects the user's own account email.
+ *    - Once saved, the partner email is LOCKED (read-only). Changing or removing the partner
+ *      requires sending an approval request to the CURRENT partner via Firestore
+ *      `blocker_disable_requests` + Trigger Email (`mail` collection). Only when the current
+ *      partner approves (`status == "approved"`) is the partner email unlocked for editing.
  * 2. Adult content blocker toggle state (OFF by default on first install).
- *    Cannot be turned OFF by PIN — turning OFF sends a disable request to Firestore + Trigger Email
- *    and waits for the partner to approve (`status == "approved"`).
+ *    - Cannot be turned OFF by PIN — turning OFF sends a disable request to Firestore + Trigger Email
+ *      and waits for the partner to approve (`status == "approved"`).
  * 3. Browser URL & keyword matching for `ProtectionService` (no DNS, no VPN).
  */
 object BlockerManager {
@@ -28,9 +32,20 @@ object BlockerManager {
     private const val KEY_PARTNER_EMAIL = "partner_email"
     private const val KEY_PENDING_REQUEST_ID = "pending_disable_request_id"
     private const val KEY_PENDING_REQUEST_TIME = "pending_disable_request_time"
+    private const val KEY_PENDING_PARTNER_CHANGE_ID = "pending_partner_change_request_id"
+    private const val KEY_PENDING_PARTNER_CHANGE_TIME = "pending_partner_change_request_time"
+
+    /**
+     * Single canonical approval web page URL (hosted on GitHub Pages `purity-approve` repository).
+     */
+    const val APPROVAL_PAGE_URL = "https://muhaiminulhasananas-cloud.github.io/purity-approve/approve.html"
 
     private var approvalListener: ListenerRegistration? = null
     private var listenedRequestId: String? = null
+
+    private var partnerChangeListener: ListenerRegistration? = null
+    private var listenedPartnerChangeId: String? = null
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private fun getDeviceProtectedContext(context: Context): Context {
@@ -42,7 +57,7 @@ object BlockerManager {
     }
 
     // =========================================================================
-    // 1. ACCOUNTABILITY PARTNER EMAIL
+    // 1. ACCOUNTABILITY PARTNER EMAIL (LOCKED ONCE SAVED)
     // =========================================================================
 
     fun getCurrentUserEmail(context: Context): String {
@@ -75,10 +90,16 @@ object BlockerManager {
     }
 
     /**
-     * Validates and saves the Accountability Partner email.
-     * Returns null on success, or an error/warning string if invalid.
+     * Validates and saves the Accountability Partner email ONLY when no valid partner email
+     * is currently locked. Once saved, overwriting is blocked until the current partner
+     * approves a partner-change request.
+     * Returns null on success, or an error/warning string if invalid or locked.
      */
     fun validateAndSavePartnerEmail(context: Context, rawEmail: String): String? {
+        if (hasValidPartnerEmail(context)) {
+            return "Partner email is locked. Request approval from your current partner to change it."
+        }
+
         val email = rawEmail.trim()
         if (email.isEmpty() || !Patterns.EMAIL_ADDRESS.matcher(email).matches()) {
             return "Please enter a valid email address"
@@ -111,19 +132,256 @@ object BlockerManager {
             putBoolean("isShieldActive", true)
         }.apply()
 
-        // Also mirror to BlockerPrefs (both standard and device-protected)
+        // Mirror to BlockerPrefs (both standard and device-protected)
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_PARTNER_EMAIL, email)
+            .remove(KEY_PENDING_PARTNER_CHANGE_ID)
+            .remove(KEY_PENDING_PARTNER_CHANGE_TIME)
             .apply()
 
         getDeviceProtectedContext(context)
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_PARTNER_EMAIL, email)
+            .remove(KEY_PENDING_PARTNER_CHANGE_ID)
+            .remove(KEY_PENDING_PARTNER_CHANGE_TIME)
             .apply()
 
         return null
+    }
+
+    /**
+     * Called ONLY when the current partner approves a partner-change request (`status == "approved"`).
+     * Clears the locked partner email so the user can enter a new partner email.
+     */
+    private fun onPartnerApprovedEmailChange(context: Context) {
+        context.getSharedPreferences(GUARDIAN_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove("guardianEmail")
+            .apply()
+
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_PARTNER_EMAIL)
+            .remove(KEY_PENDING_PARTNER_CHANGE_ID)
+            .remove(KEY_PENDING_PARTNER_CHANGE_TIME)
+            .apply()
+
+        getDeviceProtectedContext(context)
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_PARTNER_EMAIL)
+            .remove(KEY_PENDING_PARTNER_CHANGE_ID)
+            .remove(KEY_PENDING_PARTNER_CHANGE_TIME)
+            .apply()
+
+        stopListeningForPartnerChangeApproval()
+    }
+
+    fun getPendingPartnerChangeRequestId(context: Context): String? {
+        val stdPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val dpPrefs = getDeviceProtectedContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return stdPrefs.getString(KEY_PENDING_PARTNER_CHANGE_ID, null)
+            ?: dpPrefs.getString(KEY_PENDING_PARTNER_CHANGE_ID, null)
+    }
+
+    /**
+     * Sends a request to the CURRENT Accountability Partner to approve changing/removing
+     * the partner email, using the same Firestore `blocker_disable_requests` + Trigger Email flow.
+     */
+    fun sendPartnerChangeRequestToCurrentPartner(
+        context: Context,
+        onComplete: (Boolean, String) -> Unit
+    ) {
+        val currentPartnerEmail = getPartnerEmail(context)
+        if (currentPartnerEmail.isEmpty()) {
+            onComplete(false, "No active partner email to change.")
+            return
+        }
+
+        val ownEmail = getCurrentUserEmail(context)
+        val guardianPrefs = context.getSharedPreferences(GUARDIAN_PREFS_NAME, Context.MODE_PRIVATE)
+        val userName = guardianPrefs.getString("userName", "")?.takeIf { it.isNotBlank() }
+            ?: ownEmail.substringBefore("@").ifEmpty { "Your friend" }
+
+        val userId = try {
+            FirebaseAuth.getInstance().currentUser?.uid ?: "user"
+        } catch (e: Exception) {
+            "user"
+        }
+
+        val requestId = UUID.randomUUID().toString()
+        val token = UUID.randomUUID().toString().replace("-", "")
+        val now = System.currentTimeMillis()
+
+        val db = try {
+            FirebaseFirestore.getInstance()
+        } catch (e: Exception) {
+            onComplete(false, "Network error: Could not connect to Firebase.")
+            return
+        }
+
+        val requestDoc = hashMapOf(
+            "requestId" to requestId,
+            "requestType" to "change_partner",
+            "userId" to userId,
+            "userEmail" to ownEmail,
+            "userName" to userName,
+            "partnerEmail" to currentPartnerEmail,
+            "status" to "pending",
+            "token" to token,
+            "createdAt" to now
+        )
+
+        db.collection("blocker_disable_requests")
+            .document(requestId)
+            .set(requestDoc)
+            .addOnSuccessListener {
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_PENDING_PARTNER_CHANGE_ID, requestId)
+                    .putLong(KEY_PENDING_PARTNER_CHANGE_TIME, now)
+                    .apply()
+
+                getDeviceProtectedContext(context)
+                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_PENDING_PARTNER_CHANGE_ID, requestId)
+                    .putLong(KEY_PENDING_PARTNER_CHANGE_TIME, now)
+                    .apply()
+
+                ensurePartnerChangeApprovalListener(context) {}
+
+                val approveUrl = "$APPROVAL_PAGE_URL?req=$requestId&token=$token&type=change_partner"
+
+                val emailSubject = "Action Required: $userName requested to change their Accountability Partner"
+                val emailText = """
+                    Hello,
+
+                    $userName (${ownEmail.ifEmpty { "Purity Tracker user" }}) has requested to change or remove you ($currentPartnerEmail) as their Accountability Partner in Purity Tracker.
+
+                    Their partner email will stay LOCKED unless you approve this request.
+
+                    To APPROVE or DENY this partner change request, open this link:
+                    $approveUrl
+
+                    If you do NOT want to allow changing the partner email, ignore this email or click Deny.
+
+                    - Purity Tracker Accountability System
+                """.trimIndent()
+
+                val emailHtml = """
+                    <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 14px; background-color: #0f172a; color: #f8fafc;">
+                        <h2 style="color: #38bdf8; margin-top: 0;">🛡️ Purity Tracker — Partner Change Request</h2>
+                        <p style="font-size: 15px; line-height: 1.6; color: #e2e8f0;">
+                            <strong>$userName</strong> (${ownEmail.ifEmpty { "Purity Tracker User" }}) requested to <strong>change or remove</strong> their Accountability Partner email (currently <strong>$currentPartnerEmail</strong>).
+                        </p>
+                        <p style="font-size: 14px; line-height: 1.6; color: #cbd5e1;">
+                            To prevent bypassing accountability, the partner email cannot be changed without your approval.
+                        </p>
+                        <div style="margin: 28px 0; text-align: center;">
+                            <a href="$approveUrl" style="background-color: #10b981; color: #061018; font-weight: bold; text-decoration: none; padding: 14px 28px; border-radius: 10px; display: inline-block; font-size: 15px;">
+                                Review &amp; Approve Partner Change
+                            </a>
+                        </div>
+                        <p style="font-size: 12px; color: #94a3b8; text-align: center;">
+                            Or open directly: <a href="$approveUrl" style="color: #38bdf8;">$approveUrl</a>
+                        </p>
+                        <hr style="border: none; border-top: 1px solid #1e293b; margin: 20px 0;" />
+                        <p style="font-size: 12px; color: #94a3b8; margin-bottom: 0;">
+                            If you deny this request or do not click approve, you will remain their active Accountability Partner.
+                        </p>
+                    </div>
+                """.trimIndent()
+
+                val mailDoc = hashMapOf(
+                    "to" to currentPartnerEmail,
+                    "message" to hashMapOf(
+                        "subject" to emailSubject,
+                        "text" to emailText,
+                        "html" to emailHtml
+                    ),
+                    "requestId" to requestId,
+                    "timestamp" to now
+                )
+
+                db.collection("mail").add(mailDoc)
+                    .addOnSuccessListener {
+                        mainHandler.post {
+                            onComplete(true, "Partner change request sent to $currentPartnerEmail. Waiting for approval.")
+                        }
+                    }
+                    .addOnFailureListener {
+                        mainHandler.post {
+                            onComplete(true, "Partner change request queued for $currentPartnerEmail. Waiting for approval.")
+                        }
+                    }
+            }
+            .addOnFailureListener { e ->
+                mainHandler.post {
+                    onComplete(false, "Failed to send request: ${e.localizedMessage ?: "Check internet connection"}")
+                }
+            }
+    }
+
+    fun ensurePartnerChangeApprovalListener(
+        context: Context,
+        onStatusChanged: (String) -> Unit
+    ) {
+        val pendingId = getPendingPartnerChangeRequestId(context)
+        if (pendingId.isNullOrBlank() || !hasValidPartnerEmail(context)) {
+            stopListeningForPartnerChangeApproval()
+            return
+        }
+
+        if (listenedPartnerChangeId == pendingId && partnerChangeListener != null) {
+            return
+        }
+
+        stopListeningForPartnerChangeApproval()
+        listenedPartnerChangeId = pendingId
+        val appContext = context.applicationContext
+
+        try {
+            val db = FirebaseFirestore.getInstance()
+            partnerChangeListener = db.collection("blocker_disable_requests")
+                .document(pendingId)
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
+                    val status = snapshot.getString("status")?.lowercase()?.trim().orEmpty()
+                    if (status == "approved") {
+                        onPartnerApprovedEmailChange(appContext)
+                        mainHandler.post {
+                            onStatusChanged("approved")
+                        }
+                    } else if (status == "denied" || status == "rejected") {
+                        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit()
+                            .remove(KEY_PENDING_PARTNER_CHANGE_ID)
+                            .remove(KEY_PENDING_PARTNER_CHANGE_TIME)
+                            .apply()
+                        getDeviceProtectedContext(appContext)
+                            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit()
+                            .remove(KEY_PENDING_PARTNER_CHANGE_ID)
+                            .remove(KEY_PENDING_PARTNER_CHANGE_TIME)
+                            .apply()
+                        stopListeningForPartnerChangeApproval()
+                        mainHandler.post {
+                            onStatusChanged("denied")
+                        }
+                    }
+                }
+        } catch (e: Exception) {}
+    }
+
+    fun stopListeningForPartnerChangeApproval() {
+        try {
+            partnerChangeListener?.remove()
+        } catch (e: Exception) {}
+        partnerChangeListener = null
+        listenedPartnerChangeId = null
     }
 
     // =========================================================================
@@ -190,7 +448,7 @@ object BlockerManager {
     }
 
     // =========================================================================
-    // 3. PARTNER EMAIL APPROVAL FLOW (FIRESTORE + TRIGGER EMAIL)
+    // 3. PARTNER EMAIL APPROVAL FLOW FOR TURNING OFF BLOCKER
     // =========================================================================
 
     /**
@@ -236,6 +494,7 @@ object BlockerManager {
 
         val requestDoc = hashMapOf(
             "requestId" to requestId,
+            "requestType" to "disable_blocker",
             "userId" to userId,
             "userEmail" to ownEmail,
             "userName" to userName,
@@ -266,9 +525,8 @@ object BlockerManager {
                 // Start real-time listener immediately
                 ensurePartnerApprovalListener(context) {}
 
-                // Send email to accountability partner via Firebase Trigger Email (`mail` collection)
-                val githubApproveUrl = "https://muhaiminulhasananas-cloud.github.io/purity-approve/approve.html?req=$requestId&token=$token"
-                val firebaseApproveUrl = "https://purity-tracker-f4d76.web.app/approve.html?req=$requestId&token=$token"
+                // Single approval URL (GitHub Pages `purity-approve` live site)
+                val approveUrl = "$APPROVAL_PAGE_URL?req=$requestId&token=$token"
 
                 val emailSubject = "Action Required: $userName requested to turn OFF Adult Content Blocker"
                 val emailText = """
@@ -279,7 +537,7 @@ object BlockerManager {
                     As their Accountability Partner, the blocker will stay ON unless you approve this request.
 
                     To APPROVE turning off the blocker, open this link:
-                    $githubApproveUrl
+                    $approveUrl
 
                     If you do NOT want to turn off their blocker, simply ignore this email and the blocker will remain active.
 
@@ -296,12 +554,12 @@ object BlockerManager {
                             Because you are registered as their Accountability Partner, the blocker cannot be turned off without your approval.
                         </p>
                         <div style="margin: 28px 0; text-align: center;">
-                            <a href="$githubApproveUrl" style="background-color: #10b981; color: #061018; font-weight: bold; text-decoration: none; padding: 14px 28px; border-radius: 10px; display: inline-block; font-size: 15px;">
+                            <a href="$approveUrl" style="background-color: #10b981; color: #061018; font-weight: bold; text-decoration: none; padding: 14px 28px; border-radius: 10px; display: inline-block; font-size: 15px;">
                                 Approve Turning OFF Blocker
                             </a>
                         </div>
                         <p style="font-size: 12px; color: #94a3b8; text-align: center;">
-                            Or open directly: <a href="$githubApproveUrl" style="color: #38bdf8;">$githubApproveUrl</a>
+                            Or open directly: <a href="$approveUrl" style="color: #38bdf8;">$approveUrl</a>
                         </p>
                         <hr style="border: none; border-top: 1px solid #1e293b; margin: 20px 0;" />
                         <p style="font-size: 12px; color: #94a3b8; margin-bottom: 0;">
@@ -328,7 +586,6 @@ object BlockerManager {
                         }
                     }
                     .addOnFailureListener {
-                        // Request document is saved in Firestore; inform user
                         mainHandler.post {
                             onComplete(true, "Request queued for $partnerEmail. Waiting for partner approval.")
                         }
@@ -376,7 +633,6 @@ object BlockerManager {
                             onStatusChanged("approved")
                         }
                     } else if (status == "denied" || status == "rejected") {
-                        // Clear pending request ID so user knows it was denied; blocker stays ON
                         appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                             .edit()
                             .remove(KEY_PENDING_REQUEST_ID)
@@ -440,7 +696,6 @@ object BlockerManager {
         "com.torproject.torbrowser",
         "com.aloha.browser",
         "com.puffin.browser",
-        "com. via.gp",
         "mark.via.gp"
     )
 
@@ -455,7 +710,6 @@ object BlockerManager {
                 lower.contains("firefox")
     }
 
-    // High-confidence adult domains & substrings in URLs/queries
     private val ADULT_DOMAIN_MARKERS = listOf(
         "pornhub", "xvideos", "xnxx", "xhamster", "redtube", "youporn",
         "spankbang", "eporner", "tube8", "beeg.com", "chaturbate", "stripchat",
@@ -470,7 +724,6 @@ object BlockerManager {
         "pornone", "vjav", "javfinder", "supjav", "hentaigasm", "muchohentai"
     )
 
-    // Strict word-level adult keywords (matched on token boundaries to avoid false positives)
     private val ADULT_WORD_TOKENS = setOf(
         "porn", "porno", "pornhub", "xxx", "xvideos", "xnxx", "xhamster",
         "hentai", "nhentai", "rule34", "nsfw", "redtube", "youporn",
@@ -490,34 +743,26 @@ object BlockerManager {
 
     private val WORD_SPLIT_REGEX = Regex("[^\\p{L}\\p{N}]+")
 
-    /**
-     * Inspects URL bar text or visible browser text.
-     * Returns the matched adult domain/keyword if detected, or null if clean.
-     */
     fun detectAdultContent(text: String): String? {
         if (text.isBlank()) return null
         val lower = text.lowercase()
 
-        // Ignore our own block screen text if present
         if (lower.contains("purity tracker") && lower.contains("adult content blocked")) {
             return null
         }
 
-        // 1. Check domain markers
         for (domain in ADULT_DOMAIN_MARKERS) {
             if (lower.contains(domain)) {
                 return domain
             }
         }
 
-        // 2. Check multi-word phrases
         for (phrase in ADULT_PHRASES) {
             if (lower.contains(phrase)) {
                 return phrase
             }
         }
 
-        // 3. Check exact word tokens (avoids false positives on substrings like "essex", "document", "class")
         val tokens = lower.split(WORD_SPLIT_REGEX)
         for (token in tokens) {
             if (token.length >= 3 && token in ADULT_WORD_TOKENS) {

@@ -58,60 +58,116 @@
 <body>
   <div class="card">
     <div class="icon">🛡️</div>
-    <h1>Accountability Partner Decision</h1>
+    <h1 id="titleText">Accountability Partner Decision</h1>
     <p id="desc">
-      Your partner requested to turn <strong>OFF</strong> the <strong>Block adult content</strong> switch in Purity Tracker.<br/><br/>
-      Choose whether to approve or deny their request below:
+      Verifying approval link...
     </p>
     <div class="btn-row" id="actions">
-      <button class="btn-approve" id="approveBtn" onclick="submitDecision('approved')">Approve Turn OFF</button>
-      <button class="btn-deny" id="denyBtn" onclick="submitDecision('denied')">Deny (Keep Blocker ON)</button>
+      <button class="btn-approve" id="approveBtn" onclick="submitDecision('approved')" disabled>Approve</button>
+      <button class="btn-deny" id="denyBtn" onclick="submitDecision('denied')" disabled>Deny</button>
     </div>
     <div id="statusBox" class="status"></div>
   </div>
 
   <script>
     const params = new URLSearchParams(window.location.search);
-    const reqId = params.get("req");
-    const token = params.get("token");
+    const reqId = (params.get("req") || "").trim();
+    const token = (params.get("token") || "").trim();
     const PROJECT_ID = "purity-tracker-f4d76";
 
+    const descEl = document.getElementById("desc");
     const statusBox = document.getElementById("statusBox");
     const approveBtn = document.getElementById("approveBtn");
     const denyBtn = document.getElementById("denyBtn");
 
-    if (!reqId) {
+    let currentRequestType = "disable_blocker";
+
+    function showInvalidLink() {
       approveBtn.disabled = true;
       denyBtn.disabled = true;
+      descEl.textContent = "This approval link cannot be used.";
       statusBox.className = "status err";
-      statusBox.textContent = "Invalid approval link: missing request ID.";
+      statusBox.textContent = "Invalid or expired approval link";
+    }
+
+    async function verifyLinkOnLoad() {
+      if (!reqId || !token) {
+        showInvalidLink();
+        return;
+      }
+
+      try {
+        const docUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents/blocker_disable_requests/${encodeURIComponent(reqId)}`;
+        const getResp = await fetch(docUrl);
+        if (!getResp.ok) {
+          showInvalidLink();
+          return;
+        }
+
+        const existing = await getResp.json();
+        const savedToken = existing?.fields?.token?.stringValue || "";
+        if (!savedToken || savedToken !== token) {
+          showInvalidLink();
+          return;
+        }
+
+        currentRequestType = existing?.fields?.requestType?.stringValue || "disable_blocker";
+        const userName = existing?.fields?.userName?.stringValue || "Your partner";
+
+        if (currentRequestType === "change_partner") {
+          descEl.innerHTML = `<strong>${userName}</strong> requested to <strong>change or remove</strong> their Accountability Partner email in Purity Tracker.<br/><br/>Choose whether to approve or deny their request below:`;
+          approveBtn.textContent = "Approve Partner Change";
+          denyBtn.textContent = "Deny (Keep Locked)";
+        } else {
+          descEl.innerHTML = `<strong>${userName}</strong> requested to turn <strong>OFF</strong> the <strong>Block adult content</strong> switch in Purity Tracker.<br/><br/>Choose whether to approve or deny their request below:`;
+          approveBtn.textContent = "Approve Turn OFF";
+          denyBtn.textContent = "Deny (Keep Blocker ON)";
+        }
+
+        approveBtn.disabled = false;
+        denyBtn.disabled = false;
+      } catch (e) {
+        showInvalidLink();
+      }
     }
 
     async function submitDecision(newStatus) {
-      if (!reqId) return;
+      if (!reqId || !token) {
+        showInvalidLink();
+        return;
+      }
+
       approveBtn.disabled = true;
       denyBtn.disabled = true;
       statusBox.className = "status ok";
-      statusBox.textContent = "Submitting your decision...";
+      statusBox.textContent = "Verifying and submitting your decision...";
 
       try {
         const docUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents/blocker_disable_requests/${encodeURIComponent(reqId)}`;
 
-        // Verify token if document is readable
+        // 1. Always GET the request document first; if GET fails OR token mismatches, NEVER PATCH
         const getResp = await fetch(docUrl);
-        if (getResp.ok) {
-          const existing = await getResp.json();
-          const savedToken = existing?.fields?.token?.stringValue;
-          if (savedToken && token && savedToken !== token) {
-            throw new Error("Invalid security token for this request.");
-          }
+        if (!getResp.ok) {
+          showInvalidLink();
+          return;
         }
 
-        const patchUrl = `${docUrl}?updateMask.fieldPaths=status&updateMask.fieldPaths=decidedAt`;
+        const existing = await getResp.json();
+        const savedToken = existing?.fields?.token?.stringValue || "";
+        if (!savedToken || savedToken !== token) {
+          showInvalidLink();
+          return;
+        }
+
+        currentRequestType = existing?.fields?.requestType?.stringValue || currentRequestType;
+
+        // 2. Include token from URL in the PATCH body (field `token`)
+        const patchUrl = `${docUrl}?updateMask.fieldPaths=status&updateMask.fieldPaths=decidedAt&updateMask.fieldPaths=token`;
         const body = {
           fields: {
             status: { stringValue: newStatus },
-            decidedAt: { integerValue: String(Date.now()) }
+            decidedAt: { integerValue: String(Date.now()) },
+            token: { stringValue: token }
           }
         };
 
@@ -122,24 +178,27 @@
         });
 
         if (!resp.ok) {
-          const errText = await resp.text();
-          throw new Error("Firestore update failed (" + resp.status + "): " + errText);
+          showInvalidLink();
+          return;
         }
 
         if (newStatus === "approved") {
           statusBox.className = "status ok";
-          statusBox.textContent = "Approved! The Adult Content Blocker on their phone will now turn OFF automatically.";
+          statusBox.textContent = currentRequestType === "change_partner"
+            ? "Approved! Their Accountability Partner email field has been unlocked."
+            : "Approved! The Adult Content Blocker on their phone will now turn OFF automatically.";
         } else {
           statusBox.className = "status err";
-          statusBox.textContent = "Denied! The Adult Content Blocker will remain ON.";
+          statusBox.textContent = currentRequestType === "change_partner"
+            ? "Denied! Their Accountability Partner email will remain locked."
+            : "Denied! The Adult Content Blocker will remain ON.";
         }
       } catch (err) {
-        approveBtn.disabled = false;
-        denyBtn.disabled = false;
-        statusBox.className = "status err";
-        statusBox.textContent = err.message || "Could not update request status.";
+        showInvalidLink();
       }
     }
+
+    verifyLinkOnLoad();
   </script>
 </body>
 </html>

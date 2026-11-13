@@ -91,6 +91,7 @@ class ProtectionService : AccessibilityService() {
                 recordAliveHeartbeat()
                 ensureServiceConfig()
                 BlockerManager.ensurePartnerApprovalListener(this@ProtectionService) {}
+                BlockerManager.ensurePartnerChangeApprovalListener(this@ProtectionService) {}
                 ensureBackupPatrolRunning()
             } catch (e: Exception) {}
             mainHandler.postDelayed(this, 5000L)
