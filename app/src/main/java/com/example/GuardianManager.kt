@@ -45,4 +45,22 @@ object GuardianManager {
             }
         }
     }
+
+    fun sendGuardianRecoveryKeyEmail(context: Context, guardianKey: String) {
+        val prefs = context.applicationContext.getSharedPreferences("GuardianPrefs", Context.MODE_PRIVATE)
+        val userName = prefs.getString("userName", "User") ?: "User"
+        val guardianEmail = prefs.getString("guardianEmail", "") ?: ""
+        if (guardianEmail.isEmpty()) return
+        try {
+            val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+            val mailData = hashMapOf(
+                "to" to guardianEmail,
+                "message" to hashMapOf(
+                    "subject" to "🔑 Purity Tracker — Guardian Recovery Key for $userName",
+                    "html" to "Hello,<br><br><b>$userName</b>'s 6-digit Guardian Recovery Key for Purity Tracker PIN reset is:<br><br><h2 style='letter-spacing:4px;'>$guardianKey</h2><br>Keep this key safe and only share it if you approve resetting their PIN.<br><br>Thank you,<br>Purity Tracker"
+                )
+            )
+            db.collection("mail").add(mailData)
+        } catch (e: Exception) {}
+    }
 }

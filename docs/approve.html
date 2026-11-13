@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Purity Tracker — Accountability Partner Approval</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(160deg, #060b16 0%, #0f172a 55%, #1e1b4b 100%);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #f8fafc;
+    }
+    .card {
+      max-width: 460px;
+      width: 100%;
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      border-radius: 22px;
+      padding: 28px;
+      text-align: center;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+    }
+    .icon { font-size: 46px; margin-bottom: 12px; }
+    h1 { font-size: 21px; margin: 0 0 10px; color: #38bdf8; }
+    p { font-size: 14.5px; line-height: 1.6; color: #cbd5e1; margin: 0 0 18px; }
+    .btn-row { display: flex; gap: 12px; justify-content: center; margin-top: 20px; }
+    button {
+      border: none;
+      border-radius: 12px;
+      padding: 13px 22px;
+      font-size: 14.5px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .btn-approve { background: #10b981; color: #061018; }
+    .btn-deny { background: #ef4444; color: #ffffff; }
+    .status {
+      margin-top: 18px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      font-size: 13.5px;
+      font-weight: 600;
+      display: none;
+    }
+    .status.ok { display: block; background: rgba(16, 185, 129, 0.16); border: 1px solid #10b981; color: #34d399; }
+    .status.err { display: block; background: rgba(239, 68, 68, 0.16); border: 1px solid #ef4444; color: #fca5a5; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">🛡️</div>
+    <h1>Accountability Partner Decision</h1>
+    <p id="desc">
+      Your partner requested to turn <strong>OFF</strong> the <strong>Block adult content</strong> switch in Purity Tracker.<br/><br/>
+      Choose whether to approve or deny their request below:
+    </p>
+    <div class="btn-row" id="actions">
+      <button class="btn-approve" id="approveBtn" onclick="submitDecision('approved')">Approve Turn OFF</button>
+      <button class="btn-deny" id="denyBtn" onclick="submitDecision('denied')">Deny (Keep Blocker ON)</button>
+    </div>
+    <div id="statusBox" class="status"></div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const reqId = params.get("req");
+    const token = params.get("token");
+    const PROJECT_ID = "purity-tracker-f4d76";
+
+    const statusBox = document.getElementById("statusBox");
+    const approveBtn = document.getElementById("approveBtn");
+    const denyBtn = document.getElementById("denyBtn");
+
+    if (!reqId) {
+      approveBtn.disabled = true;
+      denyBtn.disabled = true;
+      statusBox.className = "status err";
+      statusBox.textContent = "Invalid approval link: missing request ID.";
+    }
+
+    async function submitDecision(newStatus) {
+      if (!reqId) return;
+      approveBtn.disabled = true;
+      denyBtn.disabled = true;
+      statusBox.className = "status ok";
+      statusBox.textContent = "Submitting your decision...";
+
+      try {
+        const docUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents/blocker_disable_requests/${encodeURIComponent(reqId)}`;
+
+        const getResp = await fetch(docUrl);
+        if (getResp.ok) {
+          const existing = await getResp.json();
+          const savedToken = existing?.fields?.token?.stringValue;
+          if (savedToken && token && savedToken !== token) {
+            throw new Error("Invalid security token for this request.");
+          }
+        }
+
+        const patchUrl = `${docUrl}?updateMask.fieldPaths=status&updateMask.fieldPaths=decidedAt`;
+        const body = {
+          fields: {
+            status: { stringValue: newStatus },
+            decidedAt: { integerValue: String(Date.now()) }
+          }
+        };
+
+        const resp = await fetch(patchUrl, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          throw new Error("Firestore update failed (" + resp.status + "): " + errText);
+        }
+
+        if (newStatus === "approved") {
+          statusBox.className = "status ok";
+          statusBox.textContent = "Approved! The Adult Content Blocker on their phone will now turn OFF automatically.";
+        } else {
+          statusBox.className = "status err";
+          statusBox.textContent = "Denied! The Adult Content Blocker will remain ON.";
+        }
+      } catch (err) {
+        approveBtn.disabled = false;
+        denyBtn.disabled = false;
+        statusBox.className = "status err";
+        statusBox.textContent = err.message || "Could not update request status.";
+      }
+    }
+  </script>
+</body>
+</html>

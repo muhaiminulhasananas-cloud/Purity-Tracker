@@ -82,13 +82,15 @@ class ProtectionService : AccessibilityService() {
     private var lastBlockElapsedTime: Long = 0L
     private var lastPatrolPackagesettings: Boolean = false
 
+    private var lastBrowserBlockElapsedTime: Long = 0L
+
     // 5-second heartbeat updater while service is alive
     private val watchdogRunnable = object : Runnable {
         override fun run() {
             try {
                 recordAliveHeartbeat()
                 ensureServiceConfig()
-                checkAndStartVpnIfNeeded()
+                BlockerManager.ensurePartnerApprovalListener(this@ProtectionService) {}
                 ensureBackupPatrolRunning()
             } catch (e: Exception) {}
             mainHandler.postDelayed(this, 5000L)
@@ -165,28 +167,7 @@ class ProtectionService : AccessibilityService() {
     }
 
     private fun checkAndStartVpnIfNeeded() {
-        try {
-            val safeCtx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                createDeviceProtectedStorageContext()
-            } else {
-                this
-            }
-            val prefs = safeCtx.getSharedPreferences("VpnPrefs", Context.MODE_PRIVATE)
-            val isVpnRunning = prefs.getBoolean("vpn_is_running", false)
-            if (isVpnRunning && !LocalDnsVpnService.isVpnInterfaceUp()) {
-                val vpnIntent = android.net.VpnService.prepare(this)
-                if (vpnIntent == null) {
-                    val serviceIntent = Intent(this, LocalDnsVpnService::class.java).apply {
-                        action = LocalDnsVpnService.ACTION_START
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(serviceIntent)
-                    } else {
-                        startService(serviceIntent)
-                    }
-                }
-            }
-        } catch (e: Exception) {}
+        // v1.3.0: Simple Blocker uses AccessibilityService + overlay only (no DNS, no VPN).
     }
 
     private fun registerScreenReceiver() {
@@ -376,8 +357,27 @@ class ProtectionService : AccessibilityService() {
             }
         } catch (e: Exception) {}
 
+        // =========================================================================
+        // 0. SIMPLE BLOCKER (v1.3.0): CHROME & ALL BROWSERS ADULT URL/KEYWORD BLOCKER
+        //    Works purely via AccessibilityService + Overlay (no DNS, no VPN).
+        //    NOTE: PIN 1-minute unlock NEVER disables or bypasses the adult blocker!
+        // =========================================================================
+        val eventPkgName = event?.packageName?.toString() ?: ""
+        val isBrowserWindow = BlockerManager.isBrowserPackage(activePkg) ||
+                BlockerManager.isBrowserPackage(eventPkgName) ||
+                allRoots.any { BlockerManager.isBrowserPackage(it.packageName?.toString() ?: "") }
+
+        if (isBrowserWindow && BlockerManager.isAdultBlockerEnabled(this)) {
+            val browserText = extractAllWindowsText(allRoots, event)
+            val matchedAdultTerm = BlockerManager.detectAdultContent(browserText)
+            if (matchedAdultTerm != null) {
+                performBrowserAdultBlock(matchedAdultTerm)
+                return true
+            }
+        }
+
         val anyRelevantPkg = isRelevantSystemOrSettingsPackage(activePkg) ||
-                (event?.packageName?.toString()?.let { isRelevantSystemOrSettingsPackage(it) } == true) ||
+                (eventPkgName.isNotEmpty() && isRelevantSystemOrSettingsPackage(eventPkgName)) ||
                 allRoots.any { isRelevantSystemOrSettingsPackage(it.packageName?.toString() ?: "") }
 
         lastPatrolPackagesettings = anyRelevantPkg
@@ -389,7 +389,7 @@ class ProtectionService : AccessibilityService() {
             return false
         }
 
-        // If user unlocked temporarily with valid PIN (strictly max 60 seconds monotonic), pause auto-back
+        // If user unlocked temporarily with valid PIN (strictly max 60 seconds monotonic), pause settings auto-back
         if (LockManager.isCurrentlyUnlocked(this)) {
             return true
         }
@@ -732,6 +732,32 @@ class ProtectionService : AccessibilityService() {
         for (r in roots) {
             if (findAndClickCancel(r, 0)) break
         }
+    }
+
+    /**
+     * Immediately navigates Back out of the adult browser page/query and shows the
+     * full-screen Blocker overlay (`SYSTEM_ALERT_WINDOW` + `BlockerOverlayActivity`).
+     */
+    private fun performBrowserAdultBlock(matchedTerm: String) {
+        val nowElapsed = SystemClock.elapsedRealtime()
+        if (nowElapsed >= lastBrowserBlockElapsedTime && (nowElapsed - lastBrowserBlockElapsedTime) < 600L) {
+            return
+        }
+        lastBrowserBlockElapsedTime = nowElapsed
+
+        // 1. Immediate Back action before the page renders
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        mainHandler.postDelayed({
+            try {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+            } catch (e: Exception) {}
+        }, 120L)
+
+        // 2. Show the BlockerHero-style overlay block screen
+        BlockerOverlayManager.showBlockScreen(this, matchedTerm)
+
+        // 3. Notify Accountability Partner via GuardianManager
+        triggerGuardianAlert("attempted to access blocked adult content ($matchedTerm)")
     }
 
     /**

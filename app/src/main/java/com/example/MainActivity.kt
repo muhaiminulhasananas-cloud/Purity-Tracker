@@ -2410,7 +2410,7 @@ fun AppScreen(
         Box(modifier = Modifier.fillMaxSize()) {
             Scaffold(
                 bottomBar = { 
-                    if (!isInsideChat && currentTab != "winter_arc") {
+                    if (!isInsideChat && currentTab != "winter_arc" && currentTab != "blocker") {
                         Column {
                             if (!isPremium && currentTab != "premium") {
                                 BannerAdView(modifier = Modifier.background(Color.Transparent))
@@ -2440,7 +2440,8 @@ fun AppScreen(
                                 onNavigateToFocus = { onTabSelected("focus") },
                                 onNavigateToAI = { showUniversalAiSheet = true },
                                 onNavigateToWinterArc = { onTabSelected("winter_arc") },
-                                onNavigateToSalah = { onTabSelected("salah") }
+                                onNavigateToSalah = { onTabSelected("salah") },
+                                onNavigateToBlocker = { onTabSelected("blocker") }
                             )
                             "salah" -> SalahTracker(
                                 onNavigateToPremium = { onTabSelected("premium") },
@@ -2459,6 +2460,9 @@ fun AppScreen(
                     }
                 } else {
                     when (currentTab) {
+                        "blocker" -> BlockerScreen(
+                            onBack = onNavigateBack
+                        )
                         "winter_arc" -> {
                             val winterArcViewModel: WinterArcViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
                             WinterArcScreen(
@@ -8303,11 +8307,11 @@ fun ProfileScreen(
 
          // Live Protection Status in Account/Settings (Polled on IO thread using real liveness + real PowerManager)
          var hasPinProfile by remember { mutableStateOf(LockManager.hasPin(context)) }
+         var isBlockerActiveProfile by remember { mutableStateOf(BlockerManager.isAdultBlockerEnabled(context)) }
          var isGuardAliveProfile by remember { mutableStateOf(false) }
          var isGuardDeadButEnabledProfile by remember { mutableStateOf(false) }
          var isBatteryIgnoredProfile by remember { mutableStateOf(false) }
          var isDeviceAdminProfile by remember { mutableStateOf(false) }
-         var isVpnActiveProfile by remember { mutableStateOf(false) }
          var isOemAutoStartVisitedProfile by remember { mutableStateOf(false) }
          var isRecentsLockedProfile by remember { mutableStateOf(false) }
 
@@ -8315,22 +8319,22 @@ fun ProfileScreen(
              while (true) {
                  val status = withContext(Dispatchers.IO) {
                      val pin = LockManager.hasPin(context)
+                     val blocker = BlockerManager.isAdultBlockerEnabled(context)
                      val guardAlive = AntiUninstallManager.isAccessibilityServiceAlive(context)
                      val guardDead = AntiUninstallManager.isAccessibilityDeadButEnabled(context)
                      val battery = AntiUninstallManager.isBatteryOptimizationIgnored(context)
                      val admin = AntiUninstallManager.isDeviceAdminActive(context)
-                     val vpn = LocalDnsVpnService.isVpnInterfaceUp()
                      val oemVisited = AntiUninstallManager.isOemAutoStartVisited(context)
                      val recentsLocked = AntiUninstallManager.isRecentsLockConfirmed(context)
                      GuardHealthWorker.checkNowAndNotify(context)
-                     listOf(pin, guardAlive, guardDead, battery, admin, vpn, oemVisited, recentsLocked)
+                     listOf(pin, blocker, guardAlive, guardDead, battery, admin, oemVisited, recentsLocked)
                  }
                  hasPinProfile = status[0]
-                 isGuardAliveProfile = status[1]
-                 isGuardDeadButEnabledProfile = status[2]
-                 isBatteryIgnoredProfile = status[3]
-                 isDeviceAdminProfile = status[4]
-                 isVpnActiveProfile = status[5]
+                 isBlockerActiveProfile = status[1]
+                 isGuardAliveProfile = status[2]
+                 isGuardDeadButEnabledProfile = status[3]
+                 isBatteryIgnoredProfile = status[4]
+                 isDeviceAdminProfile = status[5]
                  isOemAutoStartVisitedProfile = status[6]
                  isRecentsLockedProfile = status[7]
                  kotlinx.coroutines.delay(1500)
@@ -8363,12 +8367,13 @@ fun ProfileScreen(
 
          UnifiedProtectionCard(
              hasPin = hasPinProfile,
-             isDnsActive = true,
-             isVpnActive = isVpnActiveProfile,
+             isBlockerActive = isBlockerActiveProfile,
              isGuardActive = isGuardAliveProfile,
              isGuardDeadButEnabled = isGuardDeadButEnabledProfile,
              isBatteryExempt = isBatteryIgnoredProfile,
-             isAdminActive = isDeviceAdminProfile,
+             onBlockerClick = {
+                 onNavigateToStaticPage("blocker")
+             },
              onPinClick = {
                  android.widget.Toast.makeText(
                      context,
@@ -8376,44 +8381,6 @@ fun ProfileScreen(
                      else (if (LanguageStore.currentLanguage.value == "bn") "হোম স্ক্রিনে গিয়ে পিন সেট করুন।" else "Please set PIN from Home screen."),
                      android.widget.Toast.LENGTH_SHORT
                  ).show()
-             },
-             onDnsClick = {
-                 val dnsText = "family.adguard-dns.com"
-                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                 val clip = android.content.ClipData.newPlainText("Private DNS", dnsText)
-                 clipboard.setPrimaryClip(clip)
-                 ProtectionService.grantInitialDnsSetupGraceWindow()
-                 android.widget.Toast.makeText(context, if (LanguageStore.currentLanguage.value == "bn") "DNS কপি হয়েছে: $dnsText" else "Copied: $dnsText", android.widget.Toast.LENGTH_SHORT).show()
-                 try {
-                     val intent = Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
-                     context.startActivity(intent)
-                 } catch (e: Exception) {
-                     try {
-                         val intent = Intent(android.provider.Settings.ACTION_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
-                         context.startActivity(intent)
-                     } catch (e2: Exception) {}
-                 }
-             },
-             onVpnClick = {
-                 if (isVpnActiveProfile) {
-                     android.widget.Toast.makeText(
-                         context,
-                         if (LanguageStore.currentLanguage.value == "bn") "VPN শিল্ড সক্রিয় রয়েছে।" else "VPN Shield is currently active.",
-                         android.widget.Toast.LENGTH_SHORT
-                     ).show()
-                 } else {
-                     try {
-                         val prepareIntent = android.net.VpnService.prepare(context)
-                         if (prepareIntent == null) {
-                             val startIntent = Intent(context, LocalDnsVpnService::class.java).apply { action = LocalDnsVpnService.ACTION_START }
-                             context.startService(startIntent)
-                             isVpnActiveProfile = true
-                             android.widget.Toast.makeText(context, "VPN Shield Started", android.widget.Toast.LENGTH_SHORT).show()
-                         } else {
-                             context.startActivity(prepareIntent.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
-                         }
-                     } catch (e: Exception) {}
-                 }
              },
              onGuardClick = {
                  if (isGuardAliveProfile) {
@@ -8447,17 +8414,6 @@ fun ProfileScreen(
                          AntiUninstallManager.openOemAutoStartSettings(context)
                      }
                  } catch (e: Exception) {}
-             },
-             onAdminClick = {
-                 if (!isDeviceAdminProfile) {
-                     AntiUninstallManager.requestDeviceAdmin(context)
-                 } else {
-                     android.widget.Toast.makeText(
-                         context,
-                         if (LanguageStore.currentLanguage.value == "bn") "অ্যান্টি-আনইনস্টল সুরক্ষা সক্রিয় আছে।" else "Anti-Uninstall is active.",
-                         android.widget.Toast.LENGTH_SHORT
-                     ).show()
-                 }
              }
          )
          Spacer(modifier = Modifier.height(90.dp))
@@ -8986,7 +8942,8 @@ fun HomeScreen(
     onNavigateToFocus: (() -> Unit)? = null,
     onNavigateToAI: (() -> Unit)? = null,
     onNavigateToWinterArc: (() -> Unit)? = null,
-    onNavigateToSalah: (() -> Unit)? = null
+    onNavigateToSalah: (() -> Unit)? = null,
+    onNavigateToBlocker: (() -> Unit)? = null
 ) {
     val days by viewModel.durationDays.collectAsStateWithLifecycle()
     val dynamicBadges by badgesViewModel.badges.collectAsStateWithLifecycle()
@@ -9084,6 +9041,7 @@ fun HomeScreen(
         }
         val vpnPrefs = remember(safeContext) { safeContext.getSharedPreferences("VpnPrefs", Context.MODE_PRIVATE) }
         var hasPin by remember { mutableStateOf(LockManager.hasPin(context)) }
+        var isBlockerActive by remember { mutableStateOf(BlockerManager.isAdultBlockerEnabled(context)) }
         var vpnServiceRunning by remember { mutableStateOf(false) }
         var isAccessibilityEnabled by remember { mutableStateOf(false) }
         var isAccessibilityServiceRunning by remember { mutableStateOf(false) }
@@ -9115,6 +9073,7 @@ fun HomeScreen(
                 if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                     scope.launch(Dispatchers.IO) {
                         val pin = LockManager.hasPin(context)
+                        val blocker = BlockerManager.isAdultBlockerEnabled(context)
                         val gKey = if (pin) LockManager.getGuardianKey(context) else ""
                         val accAlive = AntiUninstallManager.isAccessibilityServiceAlive(context)
                         val accDead = AntiUninstallManager.isAccessibilityDeadButEnabled(context)
@@ -9123,19 +9082,9 @@ fun HomeScreen(
                         val oemVisited = AntiUninstallManager.isOemAutoStartVisited(context)
                         val recentsLocked = AntiUninstallManager.isRecentsLockConfirmed(context)
                         GuardHealthWorker.checkNowAndNotify(context)
-                        val preferRunning = vpnPrefs.getBoolean("vpn_is_running", false)
-                        var vpnUp = LocalDnsVpnService.isVpnInterfaceUp()
-                        if (preferRunning && !vpnUp) {
-                            if (android.net.VpnService.prepare(context) == null) {
-                                try {
-                                    val startIntent = Intent(context, LocalDnsVpnService::class.java).apply { action = LocalDnsVpnService.ACTION_START }
-                                    context.startService(startIntent)
-                                    vpnUp = true
-                                } catch (e: Exception) {}
-                            }
-                        }
                         withContext(Dispatchers.Main) {
                             hasPin = pin
+                            isBlockerActive = blocker
                             if (pin) activeGuardianKey = gKey
                             isAccessibilityEnabled = accAlive
                             isAccessibilityServiceRunning = accAlive
@@ -9147,7 +9096,6 @@ fun HomeScreen(
                             if (batExempt) {
                                 showBatteryExemptionDialog = false
                             }
-                            vpnServiceRunning = vpnUp
                         }
                     }
                 }
@@ -10572,48 +10520,14 @@ fun HomeScreen(
             )
         }
 
-        // Check if VPN is running/started natively.
-        var vpnLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-            androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
-        ) { result ->
-            if (result.resultCode == android.app.Activity.RESULT_OK) {
-                try {
-                    val startIntent = Intent(context, LocalDnsVpnService::class.java).apply { action = LocalDnsVpnService.ACTION_START }
-                    context.startService(startIntent)
-                } catch(e:Exception){}
-                vpnPrefs.edit().putBoolean("vpn_is_running", true).apply()
-                vpnServiceRunning = true
-                android.widget.Toast.makeText(context, "VPN Shield Activated", android.widget.Toast.LENGTH_SHORT).show()
-            }
-        }
-
-        // Persistent continuous UI-thread guard loop to keep VPN alive when app is open or active
+        // Persistent continuous UI-thread guard loop (v1.3.0: no VPN prompt, no DNS prompt)
         LaunchedEffect(Unit) {
             while (true) {
-                val preferRunning = vpnPrefs.getBoolean("vpn_is_running", false)
-                if (preferRunning) {
-                    val isUp = LocalDnsVpnService.isVpnInterfaceUp()
-                    if (!isUp) {
-                        val prepareIntent = android.net.VpnService.prepare(context)
-                        if (prepareIntent == null) {
-                            try {
-                                val startIntent = Intent(context, LocalDnsVpnService::class.java).apply { action = LocalDnsVpnService.ACTION_START }
-                                context.startService(startIntent)
-                                LocalDnsVpnService.isRunning = true
-                            } catch (e: Exception) {}
-                        } else {
-                            // If permission is missing but preferred, auto-launch prompt to ensure protection
-                            try {
-                                vpnLauncher.launch(prepareIntent)
-                            } catch (e: Exception) {}
-                        }
-                    }
-                }
-                vpnServiceRunning = LocalDnsVpnService.isVpnInterfaceUp()
                 try {
                     SettingsGuardWatchdogService.startIfInForeground(context)
                 } catch (e: Exception) {}
                 hasPin = LockManager.hasPin(context)
+                isBlockerActive = BlockerManager.isAdultBlockerEnabled(context)
                 val aliveNow = AntiUninstallManager.isAccessibilityServiceAlive(context)
                 val deadNow = AntiUninstallManager.isAccessibilityDeadButEnabled(context)
                 isAccessibilityEnabled = aliveNow
@@ -10741,15 +10655,16 @@ fun HomeScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Compact 2-Column Unified Protection Grid Card (Matching Screenshot 1)
+        // Compact 2-Column Unified Protection Grid Card (with new "Blocker" card; Private DNS & VPN removed)
         UnifiedProtectionCard(
             hasPin = hasPin,
-            isDnsActive = true,
-            isVpnActive = vpnServiceRunning,
+            isBlockerActive = isBlockerActive,
             isGuardActive = isGuardConnected,
             isGuardDeadButEnabled = isAccessibilityDeadButEnabled,
             isBatteryExempt = isBatteryIgnored,
-            isAdminActive = isDeviceAdminEnabled,
+            onBlockerClick = {
+                onNavigateToBlocker?.invoke()
+            },
             onPinClick = {
                 if (hasPin) {
                     showPinLockedInfoDialog = true
@@ -10758,42 +10673,6 @@ fun HomeScreen(
                     tempPin = ""
                     confirmPin = ""
                     showPinDialog = true
-                }
-            },
-            onDnsClick = {
-                val dnsText = "family.adguard-dns.com"
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                val clip = android.content.ClipData.newPlainText("Private DNS", dnsText)
-                clipboard.setPrimaryClip(clip)
-                android.widget.Toast.makeText(context, if (LanguageStore.currentLanguage.value == "bn") "DNS কপি হয়েছে: $dnsText" else "Copied: $dnsText", android.widget.Toast.LENGTH_SHORT).show()
-                showDnsInstructions = true
-            },
-            onVpnClick = {
-                if (!hasPin) {
-                    android.widget.Toast.makeText(context, LanguageStore.get("error_set_pin"), android.widget.Toast.LENGTH_SHORT).show()
-                    return@UnifiedProtectionCard
-                }
-                if (!vpnServiceRunning) {
-                    val intent = android.net.VpnService.prepare(context)
-                    if (intent != null) {
-                        try {
-                            vpnLauncher.launch(intent)
-                        } catch(e: Exception){}
-                    } else {
-                        try {
-                            val startIntent = Intent(context, LocalDnsVpnService::class.java).apply { action = LocalDnsVpnService.ACTION_START }
-                            context.startService(startIntent)
-                        } catch(e:Exception){}
-                        vpnPrefs.edit().putBoolean("vpn_is_running", true).apply()
-                        vpnServiceRunning = true
-                        android.widget.Toast.makeText(context, "VPN Shield Activated", android.widget.Toast.LENGTH_SHORT).show()
-                    }
-                } else {
-                    android.widget.Toast.makeText(
-                        context,
-                        if (LanguageStore.currentLanguage.value == "bn") "VPN শিল্ড সক্রিয় রয়েছে।" else "VPN Shield is already active.",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
                 }
             },
             onGuardClick = {
@@ -10834,17 +10713,6 @@ fun HomeScreen(
                         AntiUninstallManager.openOemAutoStartSettings(context)
                     }
                 } catch (e: Exception) {}
-            },
-            onAdminClick = {
-                if (!isDeviceAdminEnabled) {
-                    AntiUninstallManager.requestDeviceAdmin(context)
-                } else {
-                    android.widget.Toast.makeText(
-                        context,
-                        if (LanguageStore.currentLanguage.value == "bn") "অ্যান্টি-আনইনস্টল সুরক্ষা সক্রিয় আছে। ওএস লেভেলে আনইনস্টল বন্ধ।" else "Anti-Uninstall is active. OS-level uninstall is blocked.",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                }
             }
         )
     }
@@ -11306,25 +11174,21 @@ private fun LiveRequirementRow(
 @Composable
 fun UnifiedProtectionCard(
     hasPin: Boolean,
-    isDnsActive: Boolean,
-    isVpnActive: Boolean,
+    isBlockerActive: Boolean = false,
     isGuardActive: Boolean,
     isGuardDeadButEnabled: Boolean = false,
     isBatteryExempt: Boolean,
-    isAdminActive: Boolean,
+    onBlockerClick: () -> Unit = {},
     onPinClick: () -> Unit,
-    onDnsClick: () -> Unit,
-    onVpnClick: () -> Unit,
     onGuardClick: () -> Unit,
     onBatteryClick: () -> Unit,
-    onAdminClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val isLightMode = com.example.ui.theme.GlassTheme.isLightMode.value
     val isBn = LanguageStore.currentLanguage.value == "bn"
-    val activeCount = listOf(hasPin, isDnsActive, isVpnActive, isGuardActive, isBatteryExempt, isAdminActive).count { it }
-    val allActive = activeCount == 6
-    val headerAccent = if (allActive) Color(0xFF10B981) else if (activeCount >= 3) Color(0xFF38BDF8) else Color(0xFFF59E0B)
+    val activeCount = listOf(isBlockerActive, hasPin, isGuardActive, isBatteryExempt).count { it }
+    val allActive = activeCount == 4
+    val headerAccent = if (allActive) Color(0xFF10B981) else if (activeCount >= 2) Color(0xFF38BDF8) else Color(0xFFF59E0B)
 
     Card(
         modifier = modifier
@@ -11340,7 +11204,7 @@ fun UnifiedProtectionCard(
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Header Row: Shield Icon + "Protection" + "6/6 active"
+            // Header Row: Shield Icon + "Protection" + "4/4 active"
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -11378,7 +11242,7 @@ fun UnifiedProtectionCard(
                         .padding(horizontal = 10.dp, vertical = 4.dp)
                 ) {
                     Text(
-                        text = if (isBn) "$activeCount/৬ সক্রিয়" else "$activeCount/6 active",
+                        text = if (isBn) "$activeCount/৪ সক্রিয়" else "$activeCount/4 active",
                         color = if (allActive) Color(0xFF34D399) else headerAccent,
                         fontSize = 11.5.sp,
                         fontWeight = FontWeight.Bold
@@ -11388,11 +11252,19 @@ fun UnifiedProtectionCard(
 
             Spacer(modifier = Modifier.height(2.dp))
 
-            // Row 1: Security PIN | Private DNS
+            // Row 1: Blocker | Security PIN
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                ProtectionChip2Col(
+                    title = "Blocker",
+                    icon = Icons.Outlined.Shield,
+                    isActive = isBlockerActive,
+                    onClick = onBlockerClick,
+                    modifier = Modifier.weight(1f),
+                    accentColor = Color(0xFF10B981)
+                )
                 ProtectionChip2Col(
                     title = if (isBn) "সিকিউরিটি পিন" else "Security PIN",
                     icon = Icons.Outlined.Key,
@@ -11401,29 +11273,13 @@ fun UnifiedProtectionCard(
                     modifier = Modifier.weight(1f),
                     accentColor = Color(0xFFFBBF24)
                 )
-                ProtectionChip2Col(
-                    title = if (isBn) "প্রাইভেট DNS" else "Private DNS",
-                    icon = Icons.Outlined.Language,
-                    isActive = isDnsActive,
-                    onClick = onDnsClick,
-                    modifier = Modifier.weight(1f),
-                    accentColor = Color(0xFF38BDF8)
-                )
             }
 
-            // Row 2: VPN Shield | Settings Guard
+            // Row 2: Settings Guard | Battery Exempt
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ProtectionChip2Col(
-                    title = if (isBn) "VPN শিল্ড" else "VPN Shield",
-                    icon = Icons.Outlined.Shield,
-                    isActive = isVpnActive,
-                    onClick = onVpnClick,
-                    modifier = Modifier.weight(1f),
-                    accentColor = Color(0xFF10B981)
-                )
                 ProtectionChip2Col(
                     title = if (isGuardDeadButEnabled) {
                         if (isBn) "গার্ড থেমে গেছে!" else "Guard DEAD!"
@@ -11436,13 +11292,6 @@ fun UnifiedProtectionCard(
                     modifier = Modifier.weight(1f),
                     accentColor = Color(0xFF2DD4BF)
                 )
-            }
-
-            // Row 3: Battery Exempt | Anti-Uninstall
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
                 ProtectionChip2Col(
                     title = if (isBn) "ব্যাটারি ছাড়" else "Battery Exempt",
                     icon = Icons.Outlined.PowerSettingsNew,
@@ -11450,14 +11299,6 @@ fun UnifiedProtectionCard(
                     onClick = onBatteryClick,
                     modifier = Modifier.weight(1f),
                     accentColor = Color(0xFF818CF8)
-                )
-                ProtectionChip2Col(
-                    title = if (isBn) "অ্যান্টি-আনইনস্টল" else "Anti-Uninstall",
-                    icon = Icons.Outlined.Block,
-                    isActive = isAdminActive,
-                    onClick = onAdminClick,
-                    modifier = Modifier.weight(1f),
-                    accentColor = Color(0xFF34D399)
                 )
             }
         }
