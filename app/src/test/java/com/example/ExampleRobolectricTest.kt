@@ -48,4 +48,49 @@ class ExampleRobolectricTest {
     org.junit.Assert.assertNotNull(secondAttempt)
     assertEquals("partner1@example.com", BlockerManager.getPartnerEmail(context))
   }
+
+  @Test
+  fun `EmailJsSender builds required JSON fields and reports failure honestly`() {
+    val json = EmailJsSender.buildRequestJson(
+      toEmail = "partner@example.com",
+      subject = "Test Subject",
+      messageText = "Plain text body",
+      messageHtml = "<p>HTML body</p>",
+      serviceId = "service_123",
+      templateId = "template_456",
+      publicKey = "pub_789"
+    )
+    assertEquals("service_123", json.getString("service_id"))
+    assertEquals("template_456", json.getString("template_id"))
+    assertEquals("pub_789", json.getString("user_id"))
+
+    val params = json.getJSONObject("template_params")
+    assertEquals("partner@example.com", params.getString("to_email"))
+    assertEquals("Test Subject", params.getString("subject"))
+    assertEquals("Plain text body", params.getString("message_text"))
+    assertEquals("<p>HTML body</p>", params.getString("message_html"))
+
+    var callbackSuccess: Boolean? = null
+    var callbackMessage: String? = null
+    EmailJsSender.sendEmail(
+      toEmail = "partner@example.com",
+      subject = "Test Subject",
+      messageText = "Plain text body",
+      messageHtml = "<p>HTML body</p>",
+      endpointUrl = "http://127.0.0.1:1/unreachable",
+      onComplete = { ok, msg ->
+        callbackSuccess = ok
+        callbackMessage = msg
+      }
+    )
+
+    val deadline = System.currentTimeMillis() + 5000L
+    while (callbackSuccess == null && System.currentTimeMillis() < deadline) {
+      org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+      Thread.sleep(25)
+    }
+
+    assertEquals(false, callbackSuccess)
+    org.junit.Assert.assertTrue(callbackMessage.orEmpty().contains("Failed to send email"))
+  }
 }

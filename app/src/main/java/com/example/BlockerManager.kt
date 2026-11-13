@@ -295,28 +295,13 @@ object BlockerManager {
                     </div>
                 """.trimIndent()
 
-                val mailDoc = hashMapOf(
-                    "to" to currentPartnerEmail,
-                    "message" to hashMapOf(
-                        "subject" to emailSubject,
-                        "text" to emailText,
-                        "html" to emailHtml
-                    ),
-                    "requestId" to requestId,
-                    "timestamp" to now
+                EmailJsSender.sendEmail(
+                    toEmail = currentPartnerEmail,
+                    subject = emailSubject,
+                    messageText = emailText,
+                    messageHtml = emailHtml,
+                    onComplete = onComplete
                 )
-
-                db.collection("mail").add(mailDoc)
-                    .addOnSuccessListener {
-                        mainHandler.post {
-                            onComplete(true, "Partner change request sent to $currentPartnerEmail. Waiting for approval.")
-                        }
-                    }
-                    .addOnFailureListener {
-                        mainHandler.post {
-                            onComplete(true, "Partner change request queued for $currentPartnerEmail. Waiting for approval.")
-                        }
-                    }
             }
             .addOnFailureListener { e ->
                 mainHandler.post {
@@ -568,28 +553,13 @@ object BlockerManager {
                     </div>
                 """.trimIndent()
 
-                val mailDoc = hashMapOf(
-                    "to" to partnerEmail,
-                    "message" to hashMapOf(
-                        "subject" to emailSubject,
-                        "text" to emailText,
-                        "html" to emailHtml
-                    ),
-                    "requestId" to requestId,
-                    "timestamp" to now
+                EmailJsSender.sendEmail(
+                    toEmail = partnerEmail,
+                    subject = emailSubject,
+                    messageText = emailText,
+                    messageHtml = emailHtml,
+                    onComplete = onComplete
                 )
-
-                db.collection("mail").add(mailDoc)
-                    .addOnSuccessListener {
-                        mainHandler.post {
-                            onComplete(true, "Request sent to $partnerEmail. Waiting for partner approval.")
-                        }
-                    }
-                    .addOnFailureListener {
-                        mainHandler.post {
-                            onComplete(true, "Request queued for $partnerEmail. Waiting for partner approval.")
-                        }
-                    }
             }
             .addOnFailureListener { e ->
                 mainHandler.post {
