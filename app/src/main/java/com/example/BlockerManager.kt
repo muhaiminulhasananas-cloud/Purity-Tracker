@@ -267,7 +267,7 @@ object BlockerManager {
                 ensurePartnerApprovalListener(context) {}
 
                 // Send email to accountability partner via Firebase Trigger Email (`mail` collection)
-                val githubApproveUrl = "https://muhaiminulhasananas-cloud.github.io/Purity-Tracker/approve.html?req=$requestId&token=$token"
+                val githubApproveUrl = "https://muhaiminulhasananas-cloud.github.io/purity-approve/approve.html?req=$requestId&token=$token"
                 val firebaseApproveUrl = "https://purity-tracker-f4d76.web.app/approve.html?req=$requestId&token=$token"
 
                 val emailSubject = "Action Required: $userName requested to turn OFF Adult Content Blocker"
