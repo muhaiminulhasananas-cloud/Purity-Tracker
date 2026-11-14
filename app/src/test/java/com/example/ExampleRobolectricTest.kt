@@ -229,11 +229,65 @@ class ExampleRobolectricTest {
       )
     )
 
-    // 2. Screenshot 2: System App info screen for Purity Tracker
+    // 2. Launcher long-press menu ("Purity Tracker" + "App info" + "Uninstall") must NEVER trigger the guard!
+    val launcherLongPressMenu = """
+      Purity Tracker
+      App info
+      Uninstall
+      Share
+      Edit
+    """.trimIndent()
+    assertEquals(
+      false,
+      ProtectionService.isOurAppInfoOrTamperText(
+        launcherLongPressMenu,
+        "com.aistudio.puritytracker.abcxyz",
+        "com.oppo.launcher"
+      )
+    )
+    assertEquals(
+      false,
+      ProtectionService.isOurAppInfoOrTamperText(
+        launcherLongPressMenu,
+        "com.aistudio.puritytracker.abcxyz",
+        ""
+      )
+    )
+    assertEquals(
+      false,
+      ProtectionService.isOurUninstallPopupText(
+        launcherLongPressMenu,
+        "com.oppo.launcher"
+      )
+    )
+    assertEquals(false, ProtectionService.isSettingsOrAppInfoPackageName("com.oppo.launcher"))
+    assertEquals(false, ProtectionService.isSettingsOrAppInfoPackageName("com.android.launcher"))
+    assertEquals(false, ProtectionService.isSettingsOrAppInfoPackageName("com.miui.home"))
+    assertEquals(true, ProtectionService.isSettingsOrAppInfoPackageName("com.android.settings"))
+    assertEquals(true, ProtectionService.isSettingsOrAppInfoPackageName("com.coloros.settings"))
+
+    // Generic words ("storage", "battery", "permissions", "notifications") without Version/Force stop/Clear data must NEVER trigger
+    val genericWordsOnly = """
+      Purity Tracker
+      Storage
+      Battery
+      Permissions
+      Notifications
+    """.trimIndent()
+    assertEquals(
+      false,
+      ProtectionService.isOurAppInfoOrTamperText(
+        genericWordsOnly,
+        "com.aistudio.puritytracker.abcxyz",
+        "com.android.settings"
+      )
+    )
+
+    // 3. Screenshot 2: System App info screen for Purity Tracker (inside Settings) MUST trigger
     val screenshot2AppInfo = """
       App info
       Purity Tracker
-      Version 1.3.6
+      Version 1.3.8
       Open Force stop Uninstall
       Storage usage 42.33 MB
       Data usage details
@@ -243,13 +297,30 @@ class ExampleRobolectricTest {
       Display over other apps
       Front camera display
     """.trimIndent()
-    assertEquals(true, ProtectionService.isOurAppInfoOrTamperText(screenshot2AppInfo))
+    assertEquals(
+      true,
+      ProtectionService.isOurAppInfoOrTamperText(
+        screenshot2AppInfo,
+        "com.aistudio.puritytracker.abcxyz",
+        "com.android.settings"
+      )
+    )
 
-    // Must NEVER trigger on another app's App info screen
+    // Even if App info text were somehow inside a launcher package, pkgName check must reject it
+    assertEquals(
+      false,
+      ProtectionService.isOurAppInfoOrTamperText(
+        screenshot2AppInfo,
+        "com.aistudio.puritytracker.abcxyz",
+        "com.oppo.launcher"
+      )
+    )
+
+    // Must NEVER trigger on another app's App info screen (e.g. Spotify / WhatsApp)
     val otherAppInfo = """
       App info
-      WhatsApp
-      Version 2.24.18
+      Spotify
+      Version 8.9.18
       Open Force stop Uninstall
       Storage usage 140 MB
       Data usage details
@@ -257,7 +328,14 @@ class ExampleRobolectricTest {
       Manage notifications
       Permissions
     """.trimIndent()
-    assertEquals(false, ProtectionService.isOurAppInfoOrTamperText(otherAppInfo))
+    assertEquals(
+      false,
+      ProtectionService.isOurAppInfoOrTamperText(
+        otherAppInfo,
+        "com.aistudio.puritytracker.abcxyz",
+        "com.android.settings"
+      )
+    )
 
     // Must NEVER trigger on the multi-app "App management / All apps" list
     val multiAppList = """
@@ -265,9 +343,16 @@ class ExampleRobolectricTest {
       Search apps
       All apps
       Purity Tracker 42.33 MB
-      WhatsApp 140 MB
+      Spotify 140 MB
       Chrome 210 MB
     """.trimIndent()
-    assertEquals(false, ProtectionService.isOurAppInfoOrTamperText(multiAppList))
+    assertEquals(
+      false,
+      ProtectionService.isOurAppInfoOrTamperText(
+        multiAppList,
+        "com.aistudio.puritytracker.abcxyz",
+        "com.android.settings"
+      )
+    )
   }
 }

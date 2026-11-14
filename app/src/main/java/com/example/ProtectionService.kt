@@ -2,11 +2,12 @@ package com.example
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.ActivityOptions
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.ApplicationInfo
 import android.graphics.Color as AndroidColor
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -16,6 +17,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.Settings
 import android.text.InputFilter
 import android.text.InputType
 import android.text.method.PasswordTransformationMethod
@@ -26,11 +28,11 @@ import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 
@@ -38,14 +40,16 @@ import android.widget.Toast
  * ProtectionService: 24/7 Real-Time Android Accessibility Service for Purity Tracker.
  *
  * Protects ONLY Purity Tracker (`com.aistudio.puritytracker.abcxyz` / "Purity Tracker"):
- * 1. System App info screen for Purity Tracker (across all Android brands & versions).
+ * 1. System App info screen for Purity Tracker (ONLY after entering the Settings App info page,
+ *    never on a launcher shortcut/long-press popup menu).
  * 2. Uninstall confirmation popups for Purity Tracker (from home-screen long-press → Uninstall
  *    or App info → Uninstall, across all launchers and package installers).
  * 3. Accessibility service stop/disable screen for Purity Tracker.
  * 4. Device Admin deactivation screen for Purity Tracker.
  * 5. Adult content in browsers when the blocker is ON.
  *
- * Never blocks Settings in general, other apps' App info, or other apps' uninstall dialogs.
+ * Never blocks Settings in general, launcher long-press menus, other apps' App info,
+ * or other apps' uninstall dialogs.
  */
 class ProtectionService : AccessibilityService() {
 
@@ -84,6 +88,14 @@ class ProtectionService : AccessibilityService() {
                     svc.ensureBackupPatrolRunning()
                 }
             } catch (e: Exception) {}
+        }
+
+        fun isPinOverlayCurrentlyShowing(): Boolean {
+            return try {
+                instance?.isPinOverlayActuallyShowing() == true
+            } catch (e: Exception) {
+                false
+            }
         }
 
         fun dismissAccessibilityPinOverlayIfPresent() {
@@ -127,9 +139,75 @@ class ProtectionService : AccessibilityService() {
         }
 
         /**
+         * Returns true if the package name belongs to a Home Launcher, SystemUI, or IME keyboard.
+         * A launcher package (including its long-press shortcut menu) must NEVER be treated
+         * as the Settings App info page.
+         */
+        fun isLauncherOrSystemUiPackageName(
+            pkgName: String,
+            resolvedHomePackage: String = ""
+        ): Boolean {
+            if (pkgName.isEmpty()) return false
+            val lower = pkgName.lowercase()
+            if (resolvedHomePackage.isNotEmpty() && lower == resolvedHomePackage.lowercase()) {
+                return true
+            }
+            return lower == "com.android.systemui" ||
+                    lower.contains("systemui") ||
+                    lower.contains("launcher") ||
+                    lower.contains("trebuchet") ||
+                    lower.contains("quickstep") ||
+                    lower.contains("miui.home") ||
+                    lower.contains("globallauncher") ||
+                    lower.contains("oppo.launcher") ||
+                    lower.contains("oplus.launcher") ||
+                    lower.contains("homescreen") ||
+                    lower.contains("inputmethod") ||
+                    lower.contains("keyboard") ||
+                    lower.contains("gboard")
+        }
+
+        /**
+         * Returns true ONLY for Settings / App-info / System-manager packages.
+         * Never returns true for launchers, popup menus in launchers, SystemUI, or browsers.
+         */
+        fun isSettingsOrAppInfoPackageName(
+            pkgName: String,
+            appPackageName: String = "com.aistudio.puritytracker.abcxyz",
+            resolvedHomePackage: String = ""
+        ): Boolean {
+            if (pkgName.isEmpty()) return false
+            val lower = pkgName.lowercase()
+            if (lower == appPackageName.lowercase() ||
+                isLauncherOrSystemUiPackageName(lower, resolvedHomePackage) ||
+                BlockerManager.isBrowserPackage(lower)
+            ) {
+                return false
+            }
+            return lower.contains("settings") ||
+                    lower.contains("appmanager") ||
+                    lower.contains("applications") ||
+                    lower.contains("appplatform") ||
+                    lower.contains("appdetail") ||
+                    lower.contains("installedapp") ||
+                    lower.contains("safecenter") ||
+                    lower.contains("securitycenter") ||
+                    lower.contains("security") ||
+                    lower.contains("systemmanager") ||
+                    lower.contains("phonemanager") ||
+                    lower.contains("mobilemanager") ||
+                    lower.contains("power") ||
+                    lower.contains("battery") ||
+                    lower.contains("athena") ||
+                    lower.contains("lool") ||
+                    lower == "com.samsung.android.sm" ||
+                    lower.contains("permission")
+        }
+
+        /**
          * Pure helper for unit-testing & runtime detection:
          * Determines whether a window's raw text represents an Uninstall / Delete confirmation
-         * popup specifically for Purity Tracker (and NEVER for any other app).
+         * popup specifically for Purity Tracker (and NEVER for any other app or a launcher long-press menu).
          */
         fun isOurUninstallPopupText(
             rawWindowText: String,
@@ -147,7 +225,7 @@ class ProtectionService : AccessibilityService() {
 
             if (!hasOurIdentity) return false
 
-            // 1. Explicit title/phrase naming Purity Tracker directly
+            // 1. Explicit confirmation title/phrase naming Purity Tracker directly
             if (norm.contains("delete purity tracker") ||
                 norm.contains("uninstall purity tracker") ||
                 norm.contains("remove purity tracker") ||
@@ -197,14 +275,25 @@ class ProtectionService : AccessibilityService() {
 
         /**
          * Pure helper for unit-testing & runtime detection:
-         * Determines whether a Settings / System window's text represents the App Info,
-         * Battery Usage, or Storage screen specifically for Purity Tracker
-         * (and NEVER for any other app or the multi-app list).
+         * Determines whether a Settings window's text represents the actual App Info page,
+         * Battery Usage sub-page, or Storage / Clear Data sub-page specifically for Purity Tracker.
+         *
+         * Strictly requires:
+         * (a) Not a launcher package (so launcher long-press menus with "App info" + "Uninstall" NEVER trigger).
+         * (b) App-info-page-only content for Purity Tracker (such as "Version 1.3.x" + page rows like
+         *     "Force stop" / "Storage usage" / "Open", or "Force stop" + App info rows, or "Clear data"/"Clear storage").
+         *     Generic words like "storage", "battery", "permissions", "notifications", or "App info" + "Uninstall"
+         *     alone NEVER trigger the guard.
          */
         fun isOurAppInfoOrTamperText(
             rawWindowText: String,
-            appPackageName: String = "com.aistudio.puritytracker.abcxyz"
+            appPackageName: String = "com.aistudio.puritytracker.abcxyz",
+            pkgName: String = ""
         ): Boolean {
+            if (pkgName.isNotEmpty() && isLauncherOrSystemUiPackageName(pkgName)) {
+                return false
+            }
+
             val lower = rawWindowText.lowercase()
             val norm = normalizeForMatch(rawWindowText)
             if (norm.isEmpty()) return false
@@ -216,8 +305,8 @@ class ProtectionService : AccessibilityService() {
 
             if (!hasOurIdentity) return false
 
-            // Single-app detail markers that appear on App Info / Battery / Storage pages
-            // and do NOT appear on the multi-app "All apps" / "App management" list
+            // Single-app detail markers that ONLY appear inside the actual Settings App Info / Storage / Battery page
+            // and NEVER appear on a launcher long-press shortcut menu or multi-app list
             val hasForceStop = norm.contains("force stop") ||
                     lower.contains("ফোর্স স্টপ") ||
                     norm.contains("force quit")
@@ -248,30 +337,37 @@ class ProtectionService : AccessibilityService() {
                     lower.contains("অ্যাপ তথ্য") ||
                     lower.contains("অ্যাপের বিবরণ")
 
-            var sectionCount = 0
-            if (norm.contains("uninstall") || lower.contains("আনইনস্টল")) sectionCount++
-            if (norm.contains("storage usage") || norm.contains("storage & cache") || norm.contains("storage") || lower.contains("স্টোরেজ")) sectionCount++
-            if (norm.contains("permissions") || lower.contains("অনুমতি")) sectionCount++
-            if (norm.contains("battery usage") || norm.contains("battery saver") || norm.contains("battery") || lower.contains("ব্যাটারি")) sectionCount++
-            if (norm.contains("manage notifications") || norm.contains("notifications")) sectionCount++
-            if (norm.contains("data usage") || norm.contains("mobile data")) sectionCount++
-            if (norm.contains("display over other apps") || norm.contains("appear on top")) sectionCount++
-            if (norm.contains("open by default") || norm.contains("set as default")) sectionCount++
+            // Specific App-info page rows (never matched by a simple launcher menu containing only "App info" + "Uninstall")
+            val hasSpecificAppInfoRows =
+                    norm.contains("storage usage") ||
+                    norm.contains("storage & cache") ||
+                    norm.contains("storage and cache") ||
+                    norm.contains("data usage") ||
+                    norm.contains("battery usage") ||
+                    norm.contains("manage notifications") ||
+                    norm.contains("display over other apps") ||
+                    norm.contains("appear on top") ||
+                    norm.contains("open by default") ||
+                    norm.contains("set as default") ||
+                    lower.contains("স্টোরেজ ব্যবহার") ||
+                    lower.contains("ব্যাটারি ব্যবহার")
 
             val isMultiAppListOnly = (norm.contains("search apps") ||
                     norm.contains("all apps") ||
                     norm.contains("installed apps") ||
                     norm.contains("app list")) &&
-                    !hasForceStop && !hasVersionLabel && !hasClearStorage && !hasPowerControls && !hasAppInfoHeader
+                    !hasForceStop && !hasVersionLabel && !hasClearStorage && !hasPowerControls
 
             if (isMultiAppListOnly) return false
 
-            return hasForceStop ||
-                    hasVersionLabel ||
-                    hasClearStorage ||
-                    hasPowerControls ||
-                    (hasAppInfoHeader && sectionCount >= 1) ||
-                    sectionCount >= 3
+            // 1. Actual App Info page: requires Version label + (Force stop or page rows or Open/Uninstall)
+            //    OR Force stop + (Version label or App info header or specific App info rows)
+            val isFullAppInfoPage =
+                (hasVersionLabel && (hasForceStop || hasSpecificAppInfoRows || norm.contains("open") || norm.contains("uninstall"))) ||
+                (hasForceStop && (hasVersionLabel || hasAppInfoHeader || hasSpecificAppInfoRows || norm.contains("storage") || norm.contains("permissions")))
+
+            // 2. Storage / Clear data sub-page or Battery / Power controls sub-page for Purity Tracker
+            return isFullAppInfoPage || hasClearStorage || hasPowerControls
         }
     }
 
@@ -279,13 +375,74 @@ class ProtectionService : AccessibilityService() {
     private var screenReceiver: BroadcastReceiver? = null
     private var pinOverlayView: View? = null
 
+    @Volatile
+    private var cachedHomeLauncherPkg: String = ""
+
     private var lastBlockElapsedTime: Long = 0L
     private var lastBrowserBlockElapsedTime: Long = 0L
 
     private val followUpScanRunnable = Runnable {
         try {
-            if (!LockManager.isPinScreenCurrentlyActive()) {
+            if (!LockManager.isPinScreenCurrentlyActive() && !isPinOverlayActuallyShowing()) {
                 performFullActiveWindowScan(null)
+            }
+        } catch (e: Exception) {}
+    }
+
+    /**
+     * Delayed PIN presentation runnable (runs ~220ms after GLOBAL_ACTION_BACK so the
+     * Settings App info exit animation / Back dispatch finishes before the PIN screen appears).
+     */
+    private val presentPinRunnable = Runnable {
+        try {
+            if (!LockManager.isCurrentlyUnlocked(this)) {
+                presentPinScreenGuaranteed()
+            }
+        } catch (e: Exception) {}
+    }
+
+    /**
+     * ~520ms follow-up check after a block:
+     * 1. If the screen underneath is STILL Purity Tracker's App info or Uninstall popup, backs out again.
+     * 2. If the PIN screen is not visible yet, launches it again so no block ever swallows the PIN prompt.
+     */
+    private val followUpVerifyPinRunnable = Runnable {
+        try {
+            if (LockManager.isCurrentlyUnlocked(this)) return@Runnable
+
+            // Check if the underlying window is still Purity Tracker's restricted screen
+            if (!isPinOverlayActuallyShowing() && !LockManager.isPinActivityVisible()) {
+                val activeRoot = try { rootInActiveWindow } catch (e: Exception) { null }
+                val activePkg = activeRoot?.packageName?.toString() ?: ""
+                val roots = mutableListOf<AccessibilityNodeInfo>()
+                if (activeRoot != null) roots.add(activeRoot)
+                try {
+                    windows?.forEach { w ->
+                        val r = try { w.root } catch (e: Exception) { null }
+                        if (r != null && r.packageName?.toString() != this.packageName) {
+                            roots.add(r)
+                        }
+                    }
+                } catch (e: Exception) {}
+
+                val stillOnRestrictedScreen =
+                    checkIsOurUninstallPopup(roots, null, activePkg) ||
+                    checkIsOurAppInfoOrBatteryOrStorageScreen(roots, activePkg, null)
+
+                if (stillOnRestrictedScreen) {
+                    clickCancelButtonIfPresent(roots)
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    mainHandler.postDelayed({
+                        if (!LockManager.isCurrentlyUnlocked(this@ProtectionService)) {
+                            presentPinScreenGuaranteed()
+                        }
+                    }, 200L)
+                    return@Runnable
+                }
+            }
+
+            if (!isPinOverlayActuallyShowing() && !LockManager.isPinActivityVisible()) {
+                presentPinScreenGuaranteed()
             }
         } catch (e: Exception) {}
     }
@@ -312,11 +469,26 @@ class ProtectionService : AccessibilityService() {
                 recordAliveHeartbeat()
                 val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
                 val isScreenOn = pm?.isInteractive ?: true
-                if (isScreenOn && !LockManager.isPinScreenCurrentlyActive()) {
+                if (isScreenOn && !LockManager.isPinScreenCurrentlyActive() && !isPinOverlayActuallyShowing()) {
                     performFullActiveWindowScan(null)
                 }
             } catch (e: Exception) {}
             mainHandler.postDelayed(this, 450L)
+        }
+    }
+
+    private fun resolveHomeLauncherPkg(): String {
+        if (cachedHomeLauncherPkg.isNotEmpty()) return cachedHomeLauncherPkg
+        return try {
+            val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            val resolveInfo = packageManager.resolveActivity(homeIntent, 0)
+            val pkg = resolveInfo?.activityInfo?.packageName.orEmpty()
+            if (pkg.isNotEmpty() && pkg != "android") {
+                cachedHomeLauncherPkg = pkg
+            }
+            pkg
+        } catch (e: Exception) {
+            ""
         }
     }
 
@@ -331,6 +503,7 @@ class ProtectionService : AccessibilityService() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        resolveHomeLauncherPkg()
         recordAliveHeartbeat()
         ensureServiceConfig()
         registerScreenReceiver()
@@ -341,6 +514,7 @@ class ProtectionService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        resolveHomeLauncherPkg()
         recordAliveHeartbeat()
 
         ensureServiceConfig()
@@ -440,6 +614,7 @@ class ProtectionService : AccessibilityService() {
     override fun onRebind(intent: Intent?) {
         super.onRebind(intent)
         instance = this
+        resolveHomeLauncherPkg()
         recordAliveHeartbeat()
         ensureServiceConfig()
         registerScreenReceiver()
@@ -475,7 +650,7 @@ class ProtectionService : AccessibilityService() {
             if (eventPkg == this.packageName || eventCls.contains("PinLockActivity", ignoreCase = true)) {
                 return
             }
-            if (LockManager.isPinScreenCurrentlyActive() || pinOverlayView != null) {
+            if (LockManager.isPinScreenCurrentlyActive() || isPinOverlayActuallyShowing()) {
                 return
             }
 
@@ -492,29 +667,27 @@ class ProtectionService : AccessibilityService() {
         }
     }
 
+    private fun isLauncherOrSystemUiPackage(pkgName: String): Boolean {
+        return isLauncherOrSystemUiPackageName(pkgName, resolveHomeLauncherPkg())
+    }
+
+    private fun isSettingsOrAppManagementPackage(pkgName: String): Boolean {
+        return isSettingsOrAppInfoPackageName(pkgName, this.packageName, resolveHomeLauncherPkg())
+    }
+
     private fun isRelevantSystemOrSettingsPackage(pkgName: String): Boolean {
         if (pkgName.isEmpty() || pkgName == this.packageName) return false
+        if (isLauncherOrSystemUiPackage(pkgName) || BlockerManager.isBrowserPackage(pkgName)) {
+            return false
+        }
         val lower = pkgName.lowercase()
-        if (lower.contains("settings") ||
+        if (isSettingsOrAppManagementPackage(lower) ||
             lower.contains("wireless") ||
             lower.contains("network") ||
             lower.contains("dns") ||
             lower.contains("packageinstaller") ||
             lower.contains("uninstaller") ||
             lower.contains("installer") ||
-            lower.contains("safecenter") ||
-            lower.contains("security") ||
-            lower.contains("permission") ||
-            lower.contains("appmanager") ||
-            lower.contains("appplatform") ||
-            lower.contains("systemmanager") ||
-            lower.contains("phonemanager") ||
-            lower.contains("mobilemanager") ||
-            lower.contains("power") ||
-            lower.contains("battery") ||
-            lower.contains("athena") ||
-            lower.contains("lool") ||
-            lower == "com.samsung.android.sm" ||
             lower == "android" ||
             lower.contains("vpndialogs") ||
             lower.contains("vpn") ||
@@ -523,33 +696,14 @@ class ProtectionService : AccessibilityService() {
         ) {
             return true
         }
-        // Also recognize any OS system package (covers all phone brands' Settings / App Info / Installer packages)
-        return try {
-            val appInfo = packageManager.getApplicationInfo(pkgName, 0)
-            val isSys = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
-                    (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
-            isSys && !BlockerManager.isBrowserPackage(pkgName)
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private fun isLauncherOrSystemUiPackage(pkgName: String): Boolean {
-        val lower = pkgName.lowercase()
-        return lower == "com.android.systemui" ||
-                lower.contains("launcher") ||
-                lower.contains("trebuchet") ||
-                lower.contains("quickstep") ||
-                lower.contains("miui.home") ||
-                lower.contains("oppo.launcher") ||
-                lower.contains("oplus.launcher")
+        return false
     }
 
     /**
      * Scans the active window, all interactive windows (`windows`), and the optional event.
      */
     private fun performFullActiveWindowScan(event: AccessibilityEvent?): Boolean {
-        if (LockManager.isPinScreenCurrentlyActive() || pinOverlayView != null) {
+        if (LockManager.isPinScreenCurrentlyActive() || isPinOverlayActuallyShowing()) {
             return false
         }
         try {
@@ -581,7 +735,7 @@ class ProtectionService : AccessibilityService() {
                     val r = try { win.root } catch (e: Exception) { null }
                     if (r != null) {
                         val wPkg = r.packageName?.toString() ?: ""
-                        // If our own app / PinLockActivity window is on screen, whitelist and never auto-back
+                        // If our own app / PinLockActivity / overlay window is on screen, whitelist and never auto-back
                         if (wPkg == this.packageName) {
                             return false
                         }
@@ -621,7 +775,7 @@ class ProtectionService : AccessibilityService() {
         //    Covers BOTH entry points on every Android phone:
         //    - Home-screen long-press → Uninstall ("Delete Purity Tracker" / "Uninstall Purity Tracker")
         //    - App info → Uninstall
-        //    Strictly scoped ONLY to Purity Tracker; ignores all other apps' uninstall popups.
+        //    Strictly scoped ONLY to Purity Tracker; ignores launcher long-press menus and other apps.
         // =========================================================================
         if (checkIsOurUninstallPopup(allRoots, event, activePkg)) {
             clickCancelButtonIfPresent(allRoots)
@@ -637,7 +791,10 @@ class ProtectionService : AccessibilityService() {
             return false
         }
 
-        val combinedText = extractAllWindowsText(allRoots, event)
+        val nonLauncherRoots = allRoots.filter {
+            !isLauncherOrSystemUiPackage(it.packageName?.toString() ?: "")
+        }
+        val combinedText = extractAllWindowsText(nonLauncherRoots, event)
         if (combinedText.isEmpty()) {
             return true
         }
@@ -669,7 +826,7 @@ class ProtectionService : AccessibilityService() {
 
             val allowInitialSetup = isInitialDnsSetupGraceActive() && !isAlreadyConfiguredOnScreen
             if (!allowInitialSetup) {
-                clickCancelButtonIfPresent(allRoots)
+                clickCancelButtonIfPresent(nonLauncherRoots)
                 performAutoBackAndLock("attempted to open or disable Private DNS - LOCKED")
                 return true
             }
@@ -700,7 +857,7 @@ class ProtectionService : AccessibilityService() {
             !combinedText.contains("ডাউনলোড করা অ্যাপ")
 
         if (isExplicitAccessibilityStop || isPurityAccessibilityDetailPage) {
-            clickCancelButtonIfPresent(allRoots)
+            clickCancelButtonIfPresent(nonLauncherRoots)
             performAutoBackAndLock("attempted to disable Settings Guard - PERMANENTLY LOCKED")
             return true
         }
@@ -720,7 +877,7 @@ class ProtectionService : AccessibilityService() {
                     combinedText.contains("antiuninstalladminreceiver")
             // Allow activating Device Admin if it's currently NOT active, block deactivating when active!
             if (hasOurIdentity && AntiUninstallManager.isDeviceAdminActive(this)) {
-                clickCancelButtonIfPresent(allRoots)
+                clickCancelButtonIfPresent(nonLauncherRoots)
                 performAutoBackAndLock("attempted to deactivate Device Administrator - PERMANENTLY LOCKED")
                 return true
             }
@@ -728,12 +885,13 @@ class ProtectionService : AccessibilityService() {
 
         // =========================================================================
         // 5. SYSTEM APP INFO / BATTERY / STORAGE / CLEAR DATA FOR PURITY TRACKER
-        //    STRICTLY FOR PURITY TRACKER (Never affects any other app or general Settings)
+        //    STRICTLY FOR PURITY TRACKER AFTER ENTERING SETTINGS APP INFO PAGE
+        //    (Never triggers on launcher long-press menus, other apps, or general Settings)
         // =========================================================================
         if (!isPlayStorePkg) {
-            val isOurTamperScreen = checkIsOurAppInfoOrBatteryOrStorageScreen(allRoots, combinedText)
+            val isOurTamperScreen = checkIsOurAppInfoOrBatteryOrStorageScreen(allRoots, activePkg, event)
             if (isOurTamperScreen) {
-                clickCancelButtonIfPresent(allRoots)
+                clickCancelButtonIfPresent(nonLauncherRoots)
                 performAutoBackAndLock("attempted to open Purity Tracker App Info / Battery / Storage - PIN REQUIRED")
                 return true
             }
@@ -745,7 +903,8 @@ class ProtectionService : AccessibilityService() {
     /**
      * Checks each window root and event for an Uninstall / Delete confirmation popup
      * belonging specifically to Purity Tracker.
-     * Works across all launchers (home-screen long-press → Uninstall) and package installers.
+     * Works across all launchers (home-screen long-press → Uninstall) and package installers,
+     * while NEVER triggering on a launcher long-press menu that only shows "App info" + "Uninstall".
      */
     private fun checkIsOurUninstallPopup(
         roots: List<AccessibilityNodeInfo>,
@@ -763,7 +922,7 @@ class ProtectionService : AccessibilityService() {
             val rootText = sb.toString()
             val normRoot = normalizeForMatch(rootText)
 
-            // Direct phrase match ("Delete Purity Tracker", "Uninstall Purity Tracker", etc.)
+            // Direct confirmation title match ("Delete Purity Tracker", "Uninstall Purity Tracker", etc.)
             if (normRoot.contains("delete purity tracker") ||
                 normRoot.contains("uninstall purity tracker") ||
                 normRoot.contains("remove purity tracker") ||
@@ -775,13 +934,13 @@ class ProtectionService : AccessibilityService() {
             }
 
             // If this window is a dialog / packageinstaller / small window (or non-launcher window),
-            // check if it has both Purity Tracker's identity and an uninstall dialog prompt
+            // check if it has both Purity Tracker's identity and an explicit uninstall dialog prompt
             val isDialogOrNonLauncherWindow = count[0] <= 55 || !isLauncherOrSystemUiPackage(rootPkg)
             if (isDialogOrNonLauncherWindow && isOurUninstallPopupText(rootText, rootPkg, myPkg)) {
                 return true
             }
 
-            // Even inside a larger launcher window, if an uninstall dialog container subtree has our identity:
+            // Even inside a larger launcher window, if an uninstall confirmation dialog subtree has our identity:
             if (findUninstallDialogSubtreeForOurApp(root, myPkg)) {
                 return true
             }
@@ -811,7 +970,7 @@ class ProtectionService : AccessibilityService() {
     }
 
     /**
-     * Finds any dialog container subtree that contains an uninstall prompt/button and checks if
+     * Finds any dialog container subtree that contains an uninstall confirmation prompt and checks if
      * that dialog container specifically names Purity Tracker (ignoring background home screen icons).
      */
     private fun findUninstallDialogSubtreeForOurApp(root: AccessibilityNodeInfo?, myPkg: String): Boolean {
@@ -869,35 +1028,29 @@ class ProtectionService : AccessibilityService() {
     }
 
     /**
-     * Checks if the active screen is specifically Purity Tracker's App Info,
+     * Checks if the active screen is specifically Purity Tracker's Settings App Info page,
      * Power Consumption Controls / Battery page, or Storage/Clear Data page.
-     * Strictly verifies that Purity Tracker is the target app and NOT another app.
+     *
+     * Requires BOTH:
+     * (a) The window belongs to a Settings / App-management package (NEVER a launcher package or launcher popup menu).
+     * (b) That same Settings window contains Purity Tracker's identity AND App-info-page-only content
+     *     (Version label + rows like Force stop / Storage usage / Open, or Clear data / Power controls).
      */
     private fun checkIsOurAppInfoOrBatteryOrStorageScreen(
         roots: List<AccessibilityNodeInfo>,
-        windowText: String
+        activePkg: String,
+        event: AccessibilityEvent?
     ): Boolean {
-        // Ignore the initial system "Allow Purity Tracker to always run in background?" dialog when enabling battery exemption
-        if (!AntiUninstallManager.isSystemBatteryOptimizationIgnored(this)) {
-            if (windowText.contains("always run in background") ||
-                windowText.contains("ignore battery optimizations") ||
-                windowText.contains("stop optimizing battery usage")
-            ) {
-                return false
-            }
-        }
-
-        if (!isOurAppInfoOrTamperText(windowText, this.packageName)) {
+        // (a) Never trigger if the active foreground package is a launcher
+        if (activePkg.isNotEmpty() && isLauncherOrSystemUiPackage(activePkg)) {
             return false
         }
 
-        // Verify that a node in the active window actually displays Purity Tracker's name or package
         val myPkg = packageName.lowercase()
         val myPkgPrefix = "com.aistudio.puritytracker"
-        var hasOurAppNode = false
 
-        fun findOurAppNode(node: AccessibilityNodeInfo?, depth: Int) {
-            if (node == null || depth > 18 || hasOurAppNode) return
+        fun hasOurNodeInSubtree(node: AccessibilityNodeInfo?, depth: Int): Boolean {
+            if (node == null || depth > 18) return false
             try {
                 val txt = node.text?.toString()?.trim()?.lowercase() ?: ""
                 val desc = node.contentDescription?.toString()?.trim()?.lowercase() ?: ""
@@ -907,21 +1060,61 @@ class ProtectionService : AccessibilityService() {
                     txt.contains(myPkgPrefix) || desc.contains(myPkgPrefix) ||
                     txt == myPkg || desc == myPkg
                 ) {
-                    hasOurAppNode = true
-                    return
+                    return true
                 }
                 for (i in 0 until node.childCount) {
-                    findOurAppNode(node.getChild(i), depth + 1)
+                    if (hasOurNodeInSubtree(node.getChild(i), depth + 1)) return true
                 }
             } catch (e: Exception) {}
+            return false
         }
 
-        for (r in roots) {
-            findOurAppNode(r, 0)
-            if (hasOurAppNode) break
+        // Inspect each Settings / App-management window root individually so background launcher windows never mix in
+        for (root in roots) {
+            val rootPkg = root.packageName?.toString() ?: activePkg
+            if (!isSettingsOrAppManagementPackage(rootPkg)) {
+                continue
+            }
+
+            val sb = StringBuilder(512)
+            val count = IntArray(1)
+            appendNodeHierarchyText(root, sb, 0, count)
+            val rootText = sb.toString()
+
+            // A full Settings App Info / Storage / Battery page has multiple nodes (never a tiny 2-item popup)
+            if (count[0] < 5) {
+                continue
+            }
+
+            // Ignore the initial system "Allow Purity Tracker to always run in background?" dialog when enabling battery exemption
+            if (!AntiUninstallManager.isSystemBatteryOptimizationIgnored(this)) {
+                if (rootText.contains("always run in background") ||
+                    rootText.contains("ignore battery optimizations") ||
+                    rootText.contains("stop optimizing battery usage")
+                ) {
+                    continue
+                }
+            }
+
+            if (isOurAppInfoOrTamperText(rootText, this.packageName, rootPkg) &&
+                hasOurNodeInSubtree(root, 0)
+            ) {
+                return true
+            }
         }
 
-        return hasOurAppNode || roots.isEmpty()
+        // Fallback only when root nodes are not yet populated on a Settings window event
+        if (roots.isEmpty() && event != null) {
+            val evPkg = event.packageName?.toString() ?: activePkg
+            if (isSettingsOrAppManagementPackage(evPkg)) {
+                val evText = extractAllWindowsText(emptyList(), event)
+                if (isOurAppInfoOrTamperText(evText, this.packageName, evPkg)) {
+                    return true
+                }
+            }
+        }
+
+        return false
     }
 
     /**
@@ -977,42 +1170,107 @@ class ProtectionService : AccessibilityService() {
     }
 
     /**
-     * Immediately backs out of Purity Tracker's App info / Uninstall popup AND shows the
-     * partner-set PIN screen on top.
-     *
-     * Uses BOTH:
-     * 1. `TYPE_ACCESSIBILITY_OVERLAY` attached directly to this AccessibilityService's WindowManager
-     *    (guaranteed to display on ALL Android phones even when "Display over other apps" is OFF
-     *    or OEM background activity start is restricted), AND
-     * 2. `PinLockActivity` launch for standard Activity navigation.
+     * Returns true ONLY if `pinOverlayView` is non-null, currently attached to the WindowManager,
+     * and visible on screen. Cleans up any stale/detached `pinOverlayView` reference automatically.
+     */
+    fun isPinOverlayActuallyShowing(): Boolean {
+        val view = pinOverlayView ?: return false
+        val showing = try {
+            view.isAttachedToWindow && view.visibility == View.VISIBLE && view.windowVisibility == View.VISIBLE
+        } catch (e: Exception) {
+            false
+        }
+        if (!showing) {
+            LockManager.markPinOverlayActive(false)
+        }
+        return showing
+    }
+
+    /**
+     * Immediately backs out of Purity Tracker's App info / Uninstall popup AND guarantees
+     * that the partner-PIN verification screen appears on top and stays until the correct PIN
+     * is entered or the user cancels back to the Home screen.
      */
     private fun performAutoBackAndLock(reason: String) {
-        if (LockManager.isPinScreenCurrentlyActive() || pinOverlayView != null || LockManager.isCurrentlyUnlocked(this)) {
+        if (LockManager.isCurrentlyUnlocked(this)) {
             return
         }
+
+        // Clean up any stale overlay state so it never blocks a fresh PIN launch
+        if (pinOverlayView != null && !isPinOverlayActuallyShowing()) {
+            dismissPinOverlayInternal()
+        }
+
+        if (isPinOverlayActuallyShowing() || LockManager.isPinActivityVisible()) {
+            return
+        }
+
         val nowElapsed = SystemClock.elapsedRealtime()
-        if (nowElapsed >= lastBlockElapsedTime && (nowElapsed - lastBlockElapsedTime) < 550L) {
-            return
+        val recentlyBacked = nowElapsed >= lastBlockElapsedTime && (nowElapsed - lastBlockElapsedTime) < 450L
+
+        if (!recentlyBacked) {
+            lastBlockElapsedTime = nowElapsed
+
+            // 1. Mark short launch grace so the guard does not auto-back its own transition
+            LockManager.markPinScreenLaunching()
+
+            // 2. Immediate Back action to close the restricted App info activity or Uninstall popup
+            performGlobalAction(GLOBAL_ACTION_BACK)
+
+            // 3. Notify Accountability Partner
+            triggerGuardianAlert(reason)
         }
-        lastBlockElapsedTime = nowElapsed
 
-        // 1. Mark PIN screen launching so the guard pauses auto-back during the transition
-        LockManager.markPinScreenLaunching()
+        // 4. Present the PIN screen after ~220ms (once GLOBAL_ACTION_BACK has finished closing App info)
+        //    Never swallow this callback even if a repeated event arrived within the 450ms Back debounce!
+        mainHandler.removeCallbacks(presentPinRunnable)
+        mainHandler.postDelayed(presentPinRunnable, 220L)
 
-        // 2. Immediate Back action to dismiss the restricted App info screen or Uninstall popup
-        performGlobalAction(GLOBAL_ACTION_BACK)
-
-        // 3. Show the PIN verification screen immediately
+        // 5. Follow-up verification at ~520ms and ~950ms: if the PIN screen is not visible, launch it again
+        mainHandler.removeCallbacks(followUpVerifyPinRunnable)
+        mainHandler.postDelayed(followUpVerifyPinRunnable, 520L)
         mainHandler.postDelayed({
-            showAccessibilityPinOverlay()
-            launchPinLockScreenNow()
-        }, 55L)
+            try {
+                if (!LockManager.isCurrentlyUnlocked(this@ProtectionService) &&
+                    !isPinOverlayActuallyShowing() &&
+                    !LockManager.isPinActivityVisible()
+                ) {
+                    presentPinScreenGuaranteed()
+                }
+            } catch (e: Exception) {}
+        }, 950L)
+    }
 
-        // 4. Notify Accountability Partner
-        triggerGuardianAlert(reason)
+    /**
+     * Ensures the PIN verification UI is displayed exactly once on top of the screen:
+     * 1. First attaches the `TYPE_ACCESSIBILITY_OVERLAY` PIN screen (works on all Android phones
+     *    even when "Display over other apps" is OFF and is never covered by Settings activity transitions).
+     * 2. If the overlay cannot attach for any reason, launches `PinLockActivity` as fallback.
+     */
+    private fun presentPinScreenGuaranteed() {
+        if (LockManager.isCurrentlyUnlocked(this)) return
+        if (isPinOverlayActuallyShowing() || LockManager.isPinActivityVisible()) return
+
+        val overlayShown = showAccessibilityPinOverlay()
+        if (!overlayShown) {
+            launchPinLockScreenNow()
+        } else {
+            // Verify 120ms later that the overlay is attached and visible; if not, launch PinLockActivity fallback
+            mainHandler.postDelayed({
+                if (!LockManager.isCurrentlyUnlocked(this@ProtectionService) &&
+                    !isPinOverlayActuallyShowing() &&
+                    !LockManager.isPinActivityVisible()
+                ) {
+                    launchPinLockScreenNow()
+                }
+            }, 120L)
+        }
     }
 
     private fun launchPinLockScreenNow() {
+        if (LockManager.isCurrentlyUnlocked(this) || isPinOverlayActuallyShowing() || LockManager.isPinActivityVisible()) {
+            return
+        }
         try {
             LockManager.markPinScreenLaunching()
             val pinIntent = Intent(this, PinLockActivity::class.java).apply {
@@ -1024,19 +1282,41 @@ class ProtectionService : AccessibilityService() {
                     Intent.FLAG_ACTIVITY_NO_ANIMATION
                 )
             }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                try {
+                    val options = ActivityOptions.makeBasic().apply {
+                        setPendingIntentBackgroundActivityStartMode(
+                            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                        )
+                    }
+                    val pi = PendingIntent.getActivity(
+                        this,
+                        7701,
+                        pinIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                    pi.send(this, 0, null, null, null, null, options.toBundle())
+                } catch (e: Exception) {}
+            }
             startActivity(pinIntent)
         } catch (e: Exception) {}
     }
 
     /**
      * Displays the interactive partner-PIN screen using `TYPE_ACCESSIBILITY_OVERLAY`.
-     * Works on 100% of Android devices (OPPO, Samsung, Xiaomi, Vivo, Pixel, OnePlus, Realme)
-     * without requiring `SYSTEM_ALERT_WINDOW` ("Display over other apps") permission.
+     * Works on 100% of Android devices (OPPO/ColorOS, Samsung, Xiaomi, Vivo, Pixel, OnePlus, Realme)
+     * without requiring `SYSTEM_ALERT_WINDOW` ("Display over other apps") permission, and includes
+     * a built-in numeric keypad so PIN entry never depends on soft-keyboard window layering.
      */
-    private fun showAccessibilityPinOverlay() {
-        if (pinOverlayView != null || LockManager.isCurrentlyUnlocked(this)) return
-        try {
-            val wm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
+    private fun showAccessibilityPinOverlay(): Boolean {
+        if (LockManager.isCurrentlyUnlocked(this)) return false
+        if (isPinOverlayActuallyShowing()) return true
+        if (pinOverlayView != null) {
+            dismissPinOverlayInternal()
+        }
+
+        return try {
+            val wm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return false
             val dp = { v: Int ->
                 TypedValue.applyDimension(
                     TypedValue.COMPLEX_UNIT_DIP,
@@ -1061,7 +1341,6 @@ class ProtectionService : AccessibilityService() {
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.CENTER
-                softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
             }
 
             val rootContainer = object : FrameLayout(this) {
@@ -1074,7 +1353,21 @@ class ProtectionService : AccessibilityService() {
                 }
             }.apply {
                 setBackgroundColor(AndroidColor.parseColor("#F20F172A"))
-                setPadding(dp(24), dp(24), dp(24), dp(24))
+                setPadding(dp(20), dp(20), dp(20), dp(20))
+                isFocusable = true
+                isFocusableInTouchMode = true
+            }
+
+            val scrollView = ScrollView(this).apply {
+                isFillViewport = true
+            }
+
+            val centerWrapper = FrameLayout(this).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER
+                )
             }
 
             val card = LinearLayout(this).apply {
@@ -1086,28 +1379,28 @@ class ProtectionService : AccessibilityService() {
                     setColor(AndroidColor.parseColor("#1E293B"))
                     setStroke(dp(1), AndroidColor.parseColor("#334155"))
                 }
-                setPadding(dp(24), dp(24), dp(24), dp(24))
+                setPadding(dp(20), dp(20), dp(20), dp(18))
             }
 
             val iconBadge = TextView(this).apply {
                 text = "🔒"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
                 gravity = Gravity.CENTER
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setColor(AndroidColor.parseColor("#2600FFCC"))
                 }
-                width = dp(56)
-                height = dp(56)
+                width = dp(52)
+                height = dp(52)
             }
 
             val titleView = TextView(this).apply {
                 text = "Security Verification"
                 setTextColor(AndroidColor.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
                 typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
-                setPadding(0, dp(14), 0, dp(6))
+                setPadding(0, dp(10), 0, dp(4))
             }
 
             val hasPartnerPinNow = LockManager.hasPin(this)
@@ -1118,27 +1411,29 @@ class ProtectionService : AccessibilityService() {
                     "No partner PIN is set yet. Tap 'Forgot PIN?' below so your accountability partner can set your PIN."
                 }
                 setTextColor(AndroidColor.parseColor("#94A3B8"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                 gravity = Gravity.CENTER
-                setPadding(0, 0, 0, dp(16))
+                setPadding(0, 0, 0, dp(12))
             }
 
             val pinInput = EditText(this).apply {
                 hint = "Enter PIN (4–6 digits)"
                 setHintTextColor(AndroidColor.parseColor("#64748B"))
                 setTextColor(AndroidColor.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
                 inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
                 transformationMethod = PasswordTransformationMethod.getInstance()
                 filters = arrayOf(InputFilter.LengthFilter(6))
+                showSoftInputOnFocus = false
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
                     cornerRadius = dp(14).toFloat()
                     setColor(AndroidColor.parseColor("#0F172A"))
                     setStroke(dp(1), AndroidColor.parseColor("#00FFCC"))
                 }
-                setPadding(dp(16), dp(12), dp(16), dp(12))
+                setPadding(dp(16), dp(10), dp(16), dp(10))
             }
 
             val feedbackView = TextView(this).apply {
@@ -1147,7 +1442,101 @@ class ProtectionService : AccessibilityService() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 gravity = Gravity.CENTER
                 visibility = View.GONE
-                setPadding(0, dp(8), 0, 0)
+                setPadding(0, dp(6), 0, 0)
+            }
+
+            // Built-in numeric keypad (1-9, Clear, 0, Backspace) so PIN entry works on 100% of phones
+            // even without soft-keyboard IME elevation above TYPE_ACCESSIBILITY_OVERLAY
+            val keypadContainer = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(10), 0, dp(4))
+            }
+
+            val appendDigit = { digit: String ->
+                val current = pinInput.text?.toString().orEmpty()
+                if (current.length < 6) {
+                    val updated = current + digit
+                    pinInput.setText(updated)
+                    pinInput.setSelection(updated.length)
+                    feedbackView.visibility = View.GONE
+                }
+            }
+
+            val keypadRows = listOf(
+                listOf("1", "2", "3"),
+                listOf("4", "5", "6"),
+                listOf("7", "8", "9"),
+                listOf("CLR", "0", "⌫")
+            )
+
+            for (rowLabels in keypadRows) {
+                val rowLayout = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    weightSum = 3f
+                }
+                for (label in rowLabels) {
+                    val keyBtn = Button(this).apply {
+                        text = label
+                        isAllCaps = false
+                        setTextColor(
+                            if (label == "CLR" || label == "⌫") AndroidColor.parseColor("#94A3B8")
+                            else AndroidColor.WHITE
+                        )
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, if (label == "CLR") 12f else 16f)
+                        typeface = Typeface.DEFAULT_BOLD
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.RECTANGLE
+                            cornerRadius = dp(12).toFloat()
+                            setColor(AndroidColor.parseColor("#0F172A"))
+                            setStroke(dp(1), AndroidColor.parseColor("#334155"))
+                        }
+                        setPadding(0, dp(8), 0, dp(8))
+                        setOnClickListener {
+                            when (label) {
+                                "CLR" -> {
+                                    pinInput.setText("")
+                                    feedbackView.visibility = View.GONE
+                                }
+                                "⌫" -> {
+                                    val cur = pinInput.text?.toString().orEmpty()
+                                    if (cur.isNotEmpty()) {
+                                        val next = cur.dropLast(1)
+                                        pinInput.setText(next)
+                                        pinInput.setSelection(next.length)
+                                    }
+                                    feedbackView.visibility = View.GONE
+                                }
+                                else -> appendDigit(label)
+                            }
+                        }
+                    }
+                    val keyLp = LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+                        setMargins(dp(4), dp(3), dp(4), dp(3))
+                    }
+                    rowLayout.addView(keyBtn, keyLp)
+                }
+                keypadContainer.addView(
+                    rowLayout,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                )
+            }
+
+            // Listen for partner PIN reset approval while the overlay is open
+            BlockerManager.ensurePinResetApprovalListener(this) { status ->
+                if (status == "approved") {
+                    mainHandler.post {
+                        try {
+                            BlockerManager.consumePartnerPinResetNotice(this@ProtectionService)
+                            subtitleView.text = "Enter the security PIN set by your accountability partner to pause the guard for 60 seconds."
+                            feedbackView.setTextColor(AndroidColor.parseColor("#34D399"))
+                            feedbackView.text = "Your PIN was reset by your partner"
+                            feedbackView.visibility = View.VISIBLE
+                        } catch (e: Exception) {}
+                    }
+                }
             }
 
             val unlockBtn = Button(this).apply {
@@ -1161,7 +1550,7 @@ class ProtectionService : AccessibilityService() {
                     cornerRadius = dp(14).toFloat()
                     setColor(AndroidColor.parseColor("#00FFCC"))
                 }
-                setPadding(dp(20), dp(12), dp(20), dp(12))
+                setPadding(dp(20), dp(11), dp(20), dp(11))
                 setOnClickListener {
                     val entered = pinInput.text?.toString().orEmpty()
                     if (!LockManager.hasPin(this@ProtectionService)) {
@@ -1172,6 +1561,7 @@ class ProtectionService : AccessibilityService() {
                     } else if (LockManager.verifyPin(this@ProtectionService, entered)) {
                         LockManager.unlockForSeconds(this@ProtectionService, 60)
                         dismissPinOverlayInternal()
+                        PinLockActivity.finishIfOpen()
                         Toast.makeText(
                             this@ProtectionService,
                             "Guard paused for 60 seconds — you can now uninstall",
@@ -1228,6 +1618,7 @@ class ProtectionService : AccessibilityService() {
                 background = null
                 setOnClickListener {
                     dismissPinOverlayInternal()
+                    PinLockActivity.finishIfOpen()
                     try {
                         val homeIntent = Intent(Intent.ACTION_MAIN).apply {
                             addCategory(Intent.CATEGORY_HOME)
@@ -1246,7 +1637,7 @@ class ProtectionService : AccessibilityService() {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                topMargin = dp(16)
+                topMargin = dp(10)
             }
 
             card.addView(iconBadge)
@@ -1254,6 +1645,7 @@ class ProtectionService : AccessibilityService() {
             card.addView(subtitleView, matchWrap)
             card.addView(pinInput, matchWrap)
             card.addView(feedbackView, matchWrap)
+            card.addView(keypadContainer, matchWrap)
             card.addView(unlockBtn, unlockLp)
             card.addView(forgotBtn, matchWrap)
             card.addView(cancelBtn, matchWrap)
@@ -1263,30 +1655,65 @@ class ProtectionService : AccessibilityService() {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER
             )
-            rootContainer.addView(card, cardLp)
+            centerWrapper.addView(card, cardLp)
+            scrollView.addView(
+                centerWrapper,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+            rootContainer.addView(
+                scrollView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
 
-            wm.addView(rootContainer, params)
-            pinOverlayView = rootContainer
-            LockManager.markPinScreenActive(true)
-
-            pinInput.post {
-                try {
-                    pinInput.requestFocus()
-                    val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-                    imm?.showSoftInput(pinInput, InputMethodManager.SHOW_IMPLICIT)
-                } catch (e: Exception) {}
+            var added = false
+            try {
+                wm.addView(rootContainer, params)
+                added = true
+            } catch (e: Exception) {
+                // Fallback if TYPE_ACCESSIBILITY_OVERLAY fails and SYSTEM_ALERT_WINDOW is granted
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)) {
+                    try {
+                        params.type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                        } else {
+                            @Suppress("DEPRECATION")
+                            WindowManager.LayoutParams.TYPE_PHONE
+                        }
+                        wm.addView(rootContainer, params)
+                        added = true
+                    } catch (inner: Exception) {}
+                }
             }
-        } catch (e: Exception) {}
+
+            if (added) {
+                pinOverlayView = rootContainer
+                LockManager.markPinOverlayActive(true)
+                rootContainer.requestFocus()
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun dismissPinOverlayInternal() {
-        val view = pinOverlayView ?: return
+        val view = pinOverlayView
         pinOverlayView = null
-        LockManager.markPinScreenActive(false)
-        try {
-            val wm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager
-            wm?.removeViewImmediate(view)
-        } catch (e: Exception) {}
+        LockManager.markPinOverlayActive(false)
+        if (view != null) {
+            try {
+                val wm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+                wm?.removeViewImmediate(view)
+            } catch (e: Exception) {}
+        }
     }
 
     private fun extractAllWindowsText(
@@ -1298,7 +1725,11 @@ class ProtectionService : AccessibilityService() {
         if (event != null) {
             try {
                 val evPkg = event.packageName?.toString() ?: ""
-                if (evPkg != "com.android.systemui" && !evPkg.contains("systemui") && evPkg != this.packageName) {
+                if (evPkg != "com.android.systemui" &&
+                    !evPkg.contains("systemui") &&
+                    !isLauncherOrSystemUiPackage(evPkg) &&
+                    evPkg != this.packageName
+                ) {
                     event.text?.forEach { charSeq ->
                         if (!charSeq.isNullOrEmpty()) {
                             sb.append(charSeq.toString().lowercase()).append(' ')
@@ -1324,7 +1755,11 @@ class ProtectionService : AccessibilityService() {
         if (roots.isEmpty() && event != null) {
             try {
                 val evPkg = event.packageName?.toString() ?: ""
-                if (evPkg != "com.android.systemui" && !evPkg.contains("systemui") && evPkg != this.packageName) {
+                if (evPkg != "com.android.systemui" &&
+                    !evPkg.contains("systemui") &&
+                    !isLauncherOrSystemUiPackage(evPkg) &&
+                    evPkg != this.packageName
+                ) {
                     event.source?.let { srcNode ->
                         appendNodeHierarchyText(srcNode, sb, 0, count)
                     }

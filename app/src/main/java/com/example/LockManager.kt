@@ -222,37 +222,69 @@ object LockManager {
     private var unlockedUntilElapsedRealtime: Long = 0L
 
     @Volatile
-    private var pinScreenVisible: Boolean = false
+    private var pinActivityVisible: Boolean = false
+
+    @Volatile
+    private var pinOverlayVisible: Boolean = false
 
     @Volatile
     private var pinScreenLaunchGraceUntilElapsed: Long = 0L
 
     /**
-     * Marks that the guard is launching PinLockActivity right now so the guard
-     * immediately pauses auto-back during the launch transition and never backs out of its own PIN screen.
+     * Marks that the guard is launching the PIN screen right now so the guard
+     * pauses auto-back briefly during the window transition without blocking PIN screen display.
      */
     fun markPinScreenLaunching() {
-        pinScreenLaunchGraceUntilElapsed = android.os.SystemClock.elapsedRealtime() + 1800L
+        pinScreenLaunchGraceUntilElapsed = android.os.SystemClock.elapsedRealtime() + 400L
     }
 
     /**
-     * Updates whether PinLockActivity is actively displayed on screen.
+     * Updates whether PinLockActivity is actively resumed on screen.
      */
-    fun markPinScreenActive(active: Boolean) {
-        pinScreenVisible = active
-        if (!active) {
+    fun markPinActivityActive(active: Boolean) {
+        pinActivityVisible = active
+        if (!active && !pinOverlayVisible) {
             pinScreenLaunchGraceUntilElapsed = 0L
         }
     }
 
     /**
-     * Returns true whenever PinLockActivity is launching or visible on screen.
-     * While true, ProtectionService must pause auto-back completely.
+     * Updates whether the Accessibility PIN Overlay is actively attached and visible on screen.
+     */
+    fun markPinOverlayActive(active: Boolean) {
+        pinOverlayVisible = active
+        if (!active && !pinActivityVisible) {
+            pinScreenLaunchGraceUntilElapsed = 0L
+        }
+    }
+
+    /**
+     * Kept for backward compatibility; updates PinLockActivity visibility.
+     */
+    fun markPinScreenActive(active: Boolean) {
+        markPinActivityActive(active)
+    }
+
+    fun isPinActivityVisible(): Boolean = pinActivityVisible
+
+    fun isPinOverlayVisible(): Boolean = pinOverlayVisible
+
+    /**
+     * Returns true ONLY when either PinLockActivity or the Accessibility PIN Overlay
+     * is actually visible on screen (ignoring the short launch grace timer).
+     */
+    fun isPinScreenActuallyVisible(): Boolean {
+        return pinActivityVisible || (pinOverlayVisible && ProtectionService.isPinOverlayCurrentlyShowing())
+    }
+
+    /**
+     * Returns true whenever the PIN screen is visible or within its short launch transition grace.
+     * While true, ProtectionService pauses auto-back so it never backs out of its own PIN screen.
      */
     fun isPinScreenCurrentlyActive(): Boolean {
-        if (pinScreenVisible) return true
+        if (isPinScreenActuallyVisible()) return true
         val now = android.os.SystemClock.elapsedRealtime()
-        return pinScreenLaunchGraceUntilElapsed > now && (pinScreenLaunchGraceUntilElapsed - now) <= 2000L
+        return pinScreenLaunchGraceUntilElapsed > now && (pinScreenLaunchGraceUntilElapsed - now) <= 500L
     }
 
     fun unlockForMinutes(context: Context, minutes: Int) {
@@ -265,7 +297,8 @@ object LockManager {
         val nowWall = System.currentTimeMillis()
         val unlockWallTime = nowWall + (safeSeconds * 1000L)
         unlockedUntilElapsedRealtime = android.os.SystemClock.elapsedRealtime() + (safeSeconds * 1000L)
-        pinScreenVisible = false
+        pinActivityVisible = false
+        pinOverlayVisible = false
         pinScreenLaunchGraceUntilElapsed = 0L
         try {
             getPrefs(context).edit().putLong(KEY_UNLOCKED_UNTIL, unlockWallTime).apply()

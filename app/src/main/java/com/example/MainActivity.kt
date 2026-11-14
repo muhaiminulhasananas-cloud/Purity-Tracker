@@ -10189,7 +10189,7 @@ fun HomeScreen(
         val isBatteryIgnored = isBatteryExempt
         val isPartnerLockedHome = partnerEmailHome.isNotBlank() && BlockerManager.hasValidPartnerEmail(context)
 
-        // Single Daily Controls Card (3 compact rows + "See full Blocker page →")
+        // Single Daily Controls Card (4 compact rows: 1. App PIN, 2. Accessibility, 3. Accountability Partner Email, 4. Block adult content + "See full Blocker page →")
         Card(
             colors = CardDefaults.cardColors(containerColor = Color.Transparent),
             shape = RoundedCornerShape(18.dp),
@@ -10203,262 +10203,7 @@ fun HomeScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
-                // Row 1: Accessibility (chip "Alive" / toggle) — works IN PLACE on Home
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            if (!isGuardConnected) {
-                                AntiUninstallManager.requestAccessibilityService(context)
-                            } else {
-                                android.widget.Toast.makeText(
-                                    context,
-                                    "Accessibility guard is alive and active",
-                                    android.widget.Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                        }
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(end = 8.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(32.dp)
-                                .background(Color(0xFF2DD4BF).copy(alpha = 0.15f), RoundedCornerShape(9.dp))
-                                .border(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.4f), RoundedCornerShape(9.dp)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Security,
-                                contentDescription = null,
-                                tint = Color(0xFF2DD4BF),
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                text = "Accessibility",
-                                fontSize = 13.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = titleColor
-                            )
-                            Text(
-                                text = when {
-                                    isGuardConnected -> "Guards browsers and settings"
-                                    isAccessibilityDeadButEnabled -> "Stopped — tap to restart"
-                                    else -> "Tap to enable service"
-                                },
-                                fontSize = 11.sp,
-                                color = if (isAccessibilityDeadButEnabled) Color(0xFFF87171) else subtextColor
-                            )
-                        }
-                    }
-
-                    val accChipColor = if (isGuardConnected) Color(0xFF10B981) else Color(0xFFEF4444)
-                    Box(
-                        modifier = Modifier
-                            .background(accChipColor.copy(alpha = 0.16f), RoundedCornerShape(8.dp))
-                            .border(1.dp, accChipColor.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 9.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = if (isGuardConnected) "Alive" else if (isAccessibilityDeadButEnabled) "Stopped" else "Turn ON",
-                            color = if (isGuardConnected) Color(0xFF34D399) else Color(0xFFFCA5A5),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-
-                // Row 2: Accountability Partner Email (partner email as subtitle, chip "Locked") — works IN PLACE on Home
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            if (isPartnerLockedHome) {
-                                showHomeChangePartnerDialog = true
-                            } else {
-                                showHomeSetPartnerDialog = true
-                            }
-                        }
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(end = 8.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(32.dp)
-                                .background(Color(0xFF38BDF8).copy(alpha = 0.15f), RoundedCornerShape(9.dp))
-                                .border(1.dp, Color(0xFF38BDF8).copy(alpha = 0.4f), RoundedCornerShape(9.dp)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Outlined.Email,
-                                contentDescription = null,
-                                tint = Color(0xFF38BDF8),
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                text = "Accountability Partner Email",
-                                fontSize = 13.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = titleColor
-                            )
-                            Text(
-                                text = if (isPartnerLockedHome) partnerEmailHome else "Tap to set email",
-                                fontSize = 11.sp,
-                                color = subtextColor,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-
-                    val partnerChipColor = if (isPartnerLockedHome) Color(0xFF10B981) else Color(0xFFF59E0B)
-                    Box(
-                        modifier = Modifier
-                            .background(partnerChipColor.copy(alpha = 0.16f), RoundedCornerShape(8.dp))
-                            .border(1.dp, partnerChipColor.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 9.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = if (isPartnerLockedHome) "Locked" else "Set Email",
-                            color = if (isPartnerLockedHome) Color(0xFF34D399) else Color(0xFFFBBF24),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-
-                // Row 3: Block adult content (toggle) — works IN PLACE on Home
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(end = 8.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(32.dp)
-                                .background(
-                                    (if (isBlockerActive) Color(0xFF10B981) else Color(0xFFEF4444)).copy(alpha = 0.15f),
-                                    RoundedCornerShape(9.dp)
-                                )
-                                .border(
-                                    1.dp,
-                                    (if (isBlockerActive) Color(0xFF10B981) else Color(0xFFEF4444)).copy(alpha = 0.4f),
-                                    RoundedCornerShape(9.dp)
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Shield,
-                                contentDescription = null,
-                                tint = if (isBlockerActive) Color(0xFF34D399) else Color(0xFFF87171),
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                text = "Block adult content",
-                                fontSize = 13.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = titleColor
-                            )
-                            Text(
-                                text = if (isBlockerActive) "Active across all browsers" else "Blocks adult browser sites",
-                                fontSize = 11.sp,
-                                color = subtextColor
-                            )
-                        }
-                    }
-
-                    Switch(
-                        checked = isBlockerActive,
-                        onCheckedChange = { wantToEnable ->
-                            if (wantToEnable) {
-                                when {
-                                    !isPartnerLockedHome -> {
-                                        android.widget.Toast.makeText(
-                                            context,
-                                            "Save your Accountability Partner email first",
-                                            android.widget.Toast.LENGTH_SHORT
-                                        ).show()
-                                        showHomeSetPartnerDialog = true
-                                    }
-                                    !hasPin -> {
-                                        android.widget.Toast.makeText(
-                                            context,
-                                            "Tap App PIN below so your partner can set your PIN first",
-                                            android.widget.Toast.LENGTH_LONG
-                                        ).show()
-                                    }
-                                    !isGuardConnected -> {
-                                        android.widget.Toast.makeText(
-                                            context,
-                                            "Enable Purity Tracker in Accessibility Settings first",
-                                            android.widget.Toast.LENGTH_SHORT
-                                        ).show()
-                                        AntiUninstallManager.requestAccessibilityService(context)
-                                    }
-                                    else -> {
-                                        BlockerManager.enableAdultBlocker(context)
-                                        isBlockerActive = true
-                                        if (!AntiUninstallManager.isDeviceAdminActive(context)) {
-                                            android.widget.Toast.makeText(
-                                                context,
-                                                "Activate Device Admin to complete uninstall protection",
-                                                android.widget.Toast.LENGTH_LONG
-                                            ).show()
-                                            AntiUninstallManager.requestDeviceAdmin(context)
-                                        }
-                                    }
-                                }
-                            } else {
-                                showHomeTurnOffDialog = true
-                            }
-                        },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color(0xFF061018),
-                            checkedTrackColor = Color(0xFF10B981),
-                            uncheckedThumbColor = Color.White,
-                            uncheckedTrackColor = Color(0xFF334155)
-                        )
-                    )
-                }
-
-                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-
-                // Row 4: App PIN (badge "Set by partner" green / "Not set yet" amber) — sends partner PIN email via EmailJS
+                // Row 1: App PIN (badge "Set by partner" green / "Not set yet" amber) — sends partner PIN email via EmailJS
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -10557,6 +10302,261 @@ fun HomeScreen(
                             fontWeight = FontWeight.Bold
                         )
                     }
+                }
+
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                // Row 2: Accessibility (chip "Alive" / toggle) — works IN PLACE on Home
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            if (!isGuardConnected) {
+                                AntiUninstallManager.requestAccessibilityService(context)
+                            } else {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Accessibility guard is alive and active",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .background(Color(0xFF2DD4BF).copy(alpha = 0.15f), RoundedCornerShape(9.dp))
+                                .border(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.4f), RoundedCornerShape(9.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Security,
+                                contentDescription = null,
+                                tint = Color(0xFF2DD4BF),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Accessibility",
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = titleColor
+                            )
+                            Text(
+                                text = when {
+                                    isGuardConnected -> "Guards browsers and settings"
+                                    isAccessibilityDeadButEnabled -> "Stopped — tap to restart"
+                                    else -> "Tap to enable service"
+                                },
+                                fontSize = 11.sp,
+                                color = if (isAccessibilityDeadButEnabled) Color(0xFFF87171) else subtextColor
+                            )
+                        }
+                    }
+
+                    val accChipColor = if (isGuardConnected) Color(0xFF10B981) else Color(0xFFEF4444)
+                    Box(
+                        modifier = Modifier
+                            .background(accChipColor.copy(alpha = 0.16f), RoundedCornerShape(8.dp))
+                            .border(1.dp, accChipColor.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = if (isGuardConnected) "Alive" else if (isAccessibilityDeadButEnabled) "Stopped" else "Turn ON",
+                            color = if (isGuardConnected) Color(0xFF34D399) else Color(0xFFFCA5A5),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                // Row 3: Accountability Partner Email (partner email as subtitle, chip "Locked") — works IN PLACE on Home
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            if (isPartnerLockedHome) {
+                                showHomeChangePartnerDialog = true
+                            } else {
+                                showHomeSetPartnerDialog = true
+                            }
+                        }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .background(Color(0xFF38BDF8).copy(alpha = 0.15f), RoundedCornerShape(9.dp))
+                                .border(1.dp, Color(0xFF38BDF8).copy(alpha = 0.4f), RoundedCornerShape(9.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Email,
+                                contentDescription = null,
+                                tint = Color(0xFF38BDF8),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Accountability Partner Email",
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = titleColor
+                            )
+                            Text(
+                                text = if (isPartnerLockedHome) partnerEmailHome else "Tap to set email",
+                                fontSize = 11.sp,
+                                color = subtextColor,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    val partnerChipColor = if (isPartnerLockedHome) Color(0xFF10B981) else Color(0xFFF59E0B)
+                    Box(
+                        modifier = Modifier
+                            .background(partnerChipColor.copy(alpha = 0.16f), RoundedCornerShape(8.dp))
+                            .border(1.dp, partnerChipColor.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = if (isPartnerLockedHome) "Locked" else "Set Email",
+                            color = if (isPartnerLockedHome) Color(0xFF34D399) else Color(0xFFFBBF24),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                // Row 4: Block adult content (toggle) — works IN PLACE on Home
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .background(
+                                    (if (isBlockerActive) Color(0xFF10B981) else Color(0xFFEF4444)).copy(alpha = 0.15f),
+                                    RoundedCornerShape(9.dp)
+                                )
+                                .border(
+                                    1.dp,
+                                    (if (isBlockerActive) Color(0xFF10B981) else Color(0xFFEF4444)).copy(alpha = 0.4f),
+                                    RoundedCornerShape(9.dp)
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Shield,
+                                contentDescription = null,
+                                tint = if (isBlockerActive) Color(0xFF34D399) else Color(0xFFF87171),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Block adult content",
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = titleColor
+                            )
+                            Text(
+                                text = if (isBlockerActive) "Active across all browsers" else "Blocks adult browser sites",
+                                fontSize = 11.sp,
+                                color = subtextColor
+                            )
+                        }
+                    }
+
+                    Switch(
+                        checked = isBlockerActive,
+                        onCheckedChange = { wantToEnable ->
+                            if (wantToEnable) {
+                                when {
+                                    !isPartnerLockedHome -> {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Save your Accountability Partner email first",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                        showHomeSetPartnerDialog = true
+                                    }
+                                    !hasPin -> {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Tap App PIN above so your partner can set your PIN first",
+                                            android.widget.Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                    !isGuardConnected -> {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Enable Purity Tracker in Accessibility Settings first",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                        AntiUninstallManager.requestAccessibilityService(context)
+                                    }
+                                    else -> {
+                                        BlockerManager.enableAdultBlocker(context)
+                                        isBlockerActive = true
+                                        if (!AntiUninstallManager.isDeviceAdminActive(context)) {
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                "Activate Device Admin to complete uninstall protection",
+                                                android.widget.Toast.LENGTH_LONG
+                                            ).show()
+                                            AntiUninstallManager.requestDeviceAdmin(context)
+                                        }
+                                    }
+                                }
+                            } else {
+                                showHomeTurnOffDialog = true
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color(0xFF061018),
+                            checkedTrackColor = Color(0xFF10B981),
+                            uncheckedThumbColor = Color.White,
+                            uncheckedTrackColor = Color(0xFF334155)
+                        )
+                    )
                 }
 
                 HorizontalDivider(color = Color.White.copy(alpha = 0.08f))

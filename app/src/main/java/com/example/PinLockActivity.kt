@@ -23,9 +23,26 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 class PinLockActivity : ComponentActivity() {
+
+    companion object {
+        @Volatile
+        var isResumedInForeground: Boolean = false
+            private set
+
+        @Volatile
+        private var activeInstance: PinLockActivity? = null
+
+        fun finishIfOpen() {
+            try {
+                activeInstance?.finish()
+            } catch (e: Exception) {}
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        LockManager.markPinScreenActive(true)
+        activeInstance = this
+        LockManager.markPinActivityActive(true)
 
         onBackPressedDispatcher.addCallback(
             this,
@@ -194,7 +211,8 @@ class PinLockActivity : ComponentActivity() {
                                         pinInput = ""
                                     } else if (LockManager.verifyPin(this@PinLockActivity, pinInput)) {
                                         LockManager.unlockForSeconds(this@PinLockActivity, 60)
-                                        LockManager.markPinScreenActive(false)
+                                        LockManager.markPinActivityActive(false)
+                                        ProtectionService.dismissAccessibilityPinOverlayIfPresent()
                                         Toast.makeText(
                                             this@PinLockActivity,
                                             "Guard paused for 60 seconds — you can now uninstall",
@@ -262,7 +280,8 @@ class PinLockActivity : ComponentActivity() {
 
                             TextButton(
                                 onClick = {
-                                    LockManager.markPinScreenActive(false)
+                                    LockManager.markPinActivityActive(false)
+                                    ProtectionService.dismissAccessibilityPinOverlayIfPresent()
                                     val homeIntent = Intent(Intent.ACTION_MAIN).apply {
                                         addCategory(Intent.CATEGORY_HOME)
                                         flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -286,22 +305,35 @@ class PinLockActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        LockManager.markPinScreenActive(true)
+        activeInstance = this
+        LockManager.markPinActivityActive(true)
     }
 
     override fun onResume() {
         super.onResume()
-        ProtectionService.dismissAccessibilityPinOverlayIfPresent()
-        LockManager.markPinScreenActive(true)
+        activeInstance = this
+        isResumedInForeground = true
+        LockManager.markPinActivityActive(true)
+    }
+
+    override fun onPause() {
+        isResumedInForeground = false
+        LockManager.markPinActivityActive(false)
+        super.onPause()
     }
 
     override fun onStop() {
-        LockManager.markPinScreenActive(false)
+        isResumedInForeground = false
+        LockManager.markPinActivityActive(false)
         super.onStop()
     }
 
     override fun onDestroy() {
-        LockManager.markPinScreenActive(false)
+        if (activeInstance === this) {
+            activeInstance = null
+        }
+        isResumedInForeground = false
+        LockManager.markPinActivityActive(false)
         super.onDestroy()
     }
 
