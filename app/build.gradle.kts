@@ -19,8 +19,8 @@ android {
     applicationId = "com.aistudio.puritytracker.abcxyz"
     minSdk = 24
     targetSdk = 36
-    versionCode = 26
-    versionName = "1.3.4"
+    versionCode = 27
+    versionName = "1.3.5"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

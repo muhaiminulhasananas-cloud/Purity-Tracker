@@ -27,9 +27,9 @@ import java.util.concurrent.TimeUnit
  * (`user_id`) belongs here.
  */
 object EmailJsConfig {
-    const val SERVICE_ID = "service_uxk7xgr"
-    const val TEMPLATE_ID = "template_ik11piq"
-    const val PUBLIC_KEY = "eWcmrfHKfv-9jKkec"
+    const val SERVICE_ID = "service_skp0w8g"
+    const val TEMPLATE_ID = "template_0eupng9"
+    const val PUBLIC_KEY = "j-pFuf5HzcCyLp6Ox"
 }
 
 /**

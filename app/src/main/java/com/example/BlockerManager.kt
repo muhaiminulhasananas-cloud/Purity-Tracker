@@ -36,6 +36,7 @@ object BlockerManager {
     private const val KEY_PENDING_PARTNER_CHANGE_TIME = "pending_partner_change_request_time"
     private const val KEY_PENDING_PIN_RESET_ID = "pending_pin_reset_request_id"
     private const val KEY_PENDING_PIN_RESET_TIME = "pending_pin_reset_request_time"
+    private const val KEY_PIN_RESET_AUTHORIZED = "pin_reset_authorized_by_partner"
 
     /**
      * Single canonical approval web page URL (hosted on GitHub Pages `purity-approve` repository).
@@ -243,21 +244,6 @@ object BlockerManager {
             .document(requestId)
             .set(requestDoc)
             .addOnSuccessListener {
-                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .edit()
-                    .putString(KEY_PENDING_PARTNER_CHANGE_ID, requestId)
-                    .putLong(KEY_PENDING_PARTNER_CHANGE_TIME, now)
-                    .apply()
-
-                getDeviceProtectedContext(context)
-                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .edit()
-                    .putString(KEY_PENDING_PARTNER_CHANGE_ID, requestId)
-                    .putLong(KEY_PENDING_PARTNER_CHANGE_TIME, now)
-                    .apply()
-
-                ensurePartnerChangeApprovalListener(context) {}
-
                 val approveUrl = "$APPROVAL_PAGE_URL?req=$requestId&token=$token&type=change_partner"
 
                 val emailSubject = "Action Required: $userName requested to change their Accountability Partner"
@@ -304,9 +290,31 @@ object BlockerManager {
                     toEmail = currentPartnerEmail,
                     subject = emailSubject,
                     messageText = emailText,
-                    messageHtml = emailHtml,
-                    onComplete = onComplete
-                )
+                    messageHtml = emailHtml
+                ) { emailOk, emailMsg ->
+                    if (emailOk) {
+                        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit()
+                            .putString(KEY_PENDING_PARTNER_CHANGE_ID, requestId)
+                            .putLong(KEY_PENDING_PARTNER_CHANGE_TIME, now)
+                            .apply()
+
+                        getDeviceProtectedContext(context)
+                            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit()
+                            .putString(KEY_PENDING_PARTNER_CHANGE_ID, requestId)
+                            .putLong(KEY_PENDING_PARTNER_CHANGE_TIME, now)
+                            .apply()
+
+                        ensurePartnerChangeApprovalListener(context) {}
+                        onComplete(true, emailMsg)
+                    } else {
+                        try {
+                            db.collection("blocker_disable_requests").document(requestId).delete()
+                        } catch (e: Exception) {}
+                        onComplete(false, emailMsg)
+                    }
+                }
             }
             .addOnFailureListener { e ->
                 mainHandler.post {
@@ -498,23 +506,6 @@ object BlockerManager {
             .document(requestId)
             .set(requestDoc)
             .addOnSuccessListener {
-                // Save pending request ID locally
-                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .edit()
-                    .putString(KEY_PENDING_REQUEST_ID, requestId)
-                    .putLong(KEY_PENDING_REQUEST_TIME, now)
-                    .apply()
-
-                getDeviceProtectedContext(context)
-                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .edit()
-                    .putString(KEY_PENDING_REQUEST_ID, requestId)
-                    .putLong(KEY_PENDING_REQUEST_TIME, now)
-                    .apply()
-
-                // Start real-time listener immediately
-                ensurePartnerApprovalListener(context) {}
-
                 // Single approval URL (GitHub Pages `purity-approve` live site)
                 val approveUrl = "$APPROVAL_PAGE_URL?req=$requestId&token=$token"
 
@@ -562,9 +553,31 @@ object BlockerManager {
                     toEmail = partnerEmail,
                     subject = emailSubject,
                     messageText = emailText,
-                    messageHtml = emailHtml,
-                    onComplete = onComplete
-                )
+                    messageHtml = emailHtml
+                ) { emailOk, emailMsg ->
+                    if (emailOk) {
+                        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit()
+                            .putString(KEY_PENDING_REQUEST_ID, requestId)
+                            .putLong(KEY_PENDING_REQUEST_TIME, now)
+                            .apply()
+
+                        getDeviceProtectedContext(context)
+                            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit()
+                            .putString(KEY_PENDING_REQUEST_ID, requestId)
+                            .putLong(KEY_PENDING_REQUEST_TIME, now)
+                            .apply()
+
+                        ensurePartnerApprovalListener(context) {}
+                        onComplete(true, emailMsg)
+                    } else {
+                        try {
+                            db.collection("blocker_disable_requests").document(requestId).delete()
+                        } catch (e: Exception) {}
+                        onComplete(false, emailMsg)
+                    }
+                }
             }
             .addOnFailureListener { e ->
                 mainHandler.post {
@@ -645,13 +658,34 @@ object BlockerManager {
             ?: dpPrefs.getString(KEY_PENDING_PIN_RESET_ID, null)
     }
 
-    private fun onPartnerApprovedPinReset(context: Context) {
+    fun isPinResetAuthorized(context: Context): Boolean {
+        val stdPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val dpPrefs = getDeviceProtectedContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return stdPrefs.getBoolean(KEY_PIN_RESET_AUTHORIZED, false) ||
+                dpPrefs.getBoolean(KEY_PIN_RESET_AUTHORIZED, false)
+    }
+
+    fun clearPinResetAuthorized(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_PIN_RESET_AUTHORIZED, false)
+            .apply()
+
+        getDeviceProtectedContext(context)
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_PIN_RESET_AUTHORIZED, false)
+            .apply()
+    }
+
+    fun onPartnerApprovedPinReset(context: Context) {
         LockManager.clearPinAfterPartnerApproval(context)
 
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .remove(KEY_PENDING_PIN_RESET_ID)
             .remove(KEY_PENDING_PIN_RESET_TIME)
+            .putBoolean(KEY_PIN_RESET_AUTHORIZED, true)
             .apply()
 
         getDeviceProtectedContext(context)
@@ -659,6 +693,7 @@ object BlockerManager {
             .edit()
             .remove(KEY_PENDING_PIN_RESET_ID)
             .remove(KEY_PENDING_PIN_RESET_TIME)
+            .putBoolean(KEY_PIN_RESET_AUTHORIZED, true)
             .apply()
 
         stopListeningForPinResetApproval()
@@ -703,7 +738,7 @@ object BlockerManager {
 
         val requestDoc = hashMapOf(
             "requestId" to requestId,
-            "requestType" to "reset_pin",
+            "requestType" to "pin_reset",
             "userId" to userId,
             "userEmail" to ownEmail,
             "userName" to userName,
@@ -717,22 +752,7 @@ object BlockerManager {
             .document(requestId)
             .set(requestDoc)
             .addOnSuccessListener {
-                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .edit()
-                    .putString(KEY_PENDING_PIN_RESET_ID, requestId)
-                    .putLong(KEY_PENDING_PIN_RESET_TIME, now)
-                    .apply()
-
-                getDeviceProtectedContext(context)
-                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .edit()
-                    .putString(KEY_PENDING_PIN_RESET_ID, requestId)
-                    .putLong(KEY_PENDING_PIN_RESET_TIME, now)
-                    .apply()
-
-                ensurePinResetApprovalListener(context) {}
-
-                val approveUrl = "$APPROVAL_PAGE_URL?req=$requestId&token=$token&type=reset_pin"
+                val approveUrl = "$APPROVAL_PAGE_URL?req=$requestId&token=$token&type=pin_reset"
 
                 val emailSubject = "Action Required: $userName requested to reset their App Security PIN"
                 val emailText = """
@@ -778,9 +798,31 @@ object BlockerManager {
                     toEmail = partnerEmail,
                     subject = emailSubject,
                     messageText = emailText,
-                    messageHtml = emailHtml,
-                    onComplete = onComplete
-                )
+                    messageHtml = emailHtml
+                ) { emailOk, emailMsg ->
+                    if (emailOk) {
+                        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit()
+                            .putString(KEY_PENDING_PIN_RESET_ID, requestId)
+                            .putLong(KEY_PENDING_PIN_RESET_TIME, now)
+                            .apply()
+
+                        getDeviceProtectedContext(context)
+                            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit()
+                            .putString(KEY_PENDING_PIN_RESET_ID, requestId)
+                            .putLong(KEY_PENDING_PIN_RESET_TIME, now)
+                            .apply()
+
+                        ensurePinResetApprovalListener(context) {}
+                        onComplete(true, "PIN reset request sent — waiting for partner approval")
+                    } else {
+                        try {
+                            db.collection("blocker_disable_requests").document(requestId).delete()
+                        } catch (e: Exception) {}
+                        onComplete(false, emailMsg)
+                    }
+                }
             }
             .addOnFailureListener { e ->
                 mainHandler.post {

@@ -132,6 +132,12 @@ fun BlockerScreen(
         isOemAutoStartOn = states[9] as Boolean
         isDeviceAdminActive = states[10] as Boolean
 
+        val pinResetAuthorized = BlockerManager.isPinResetAuthorized(context)
+        if (pinResetAuthorized && !hasPin && !showSetPinModal) {
+            showSetPinModal = true
+            topStatusBanner = "Partner authorized PIN reset. Set your new 4-digit PIN."
+        }
+
         if (pendingTurnOnAfterAccessibility && nowAccAlive && hasPin && BlockerManager.hasValidPartnerEmail(context)) {
             pendingTurnOnAfterAccessibility = false
             BlockerManager.enableAdultBlocker(context)
@@ -194,6 +200,11 @@ fun BlockerScreen(
                 isOemAutoStartOn = AntiUninstallManager.isOemAutoStartVisited(context)
                 isDeviceAdminActive = AntiUninstallManager.isDeviceAdminActive(context)
 
+                if (BlockerManager.isPinResetAuthorized(context) && !hasPin) {
+                    showSetPinModal = true
+                    topStatusBanner = "Partner authorized PIN reset. Set your new 4-digit PIN."
+                }
+
                 if (pendingTurnOnAfterAccessibility && isAccessibilityAlive && hasPin && BlockerManager.hasValidPartnerEmail(context)) {
                     pendingTurnOnAfterAccessibility = false
                     BlockerManager.enableAdultBlocker(context)
@@ -214,7 +225,7 @@ fun BlockerScreen(
         !pendingPartnerChangeId.isNullOrBlank() ->
             "Partner change request sent to $savedPartnerEmail. Waiting for partner approval."
         !pendingPinResetId.isNullOrBlank() && hasPin ->
-            "PIN reset request sent to $savedPartnerEmail. Waiting for partner approval."
+            "PIN reset request sent — waiting for partner approval"
         else -> null
     }
 
@@ -1014,6 +1025,7 @@ private fun BlockerPinSetupDialog(
                     } else {
                         val (saved, _) = LockManager.setPin(context, pinInput)
                         if (saved) {
+                            BlockerManager.clearPinResetAuthorized(context)
                             onPinSaved()
                         } else {
                             Toast.makeText(context, "Could not save PIN", Toast.LENGTH_SHORT).show()

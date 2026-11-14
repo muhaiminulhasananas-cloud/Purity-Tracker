@@ -95,25 +95,41 @@ class ExampleRobolectricTest {
   }
 
   @Test
+  fun `EmailJsConfig uses Purity Tracker Team account IDs`() {
+    assertEquals("service_skp0w8g", EmailJsConfig.SERVICE_ID)
+    assertEquals("template_0eupng9", EmailJsConfig.TEMPLATE_ID)
+    assertEquals("j-pFuf5HzcCyLp6Ox", EmailJsConfig.PUBLIC_KEY)
+  }
+
+  @Test
   fun `PIN cannot be overwritten alone and unlocks only after partner approval`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     context.getSharedPreferences("AppLockPrefs", Context.MODE_PRIVATE).edit().clear().commit()
+    context.getSharedPreferences("BlockerPrefs", Context.MODE_PRIVATE).edit().clear().commit()
 
     val (firstSaved, _) = LockManager.setPin(context, "1234")
     assertEquals(true, firstSaved)
     assertEquals("1234", LockManager.getPin(context))
+    assertEquals(true, LockManager.verifyPin(context, "1234"))
+    assertEquals(false, LockManager.verifyPin(context, "5678"))
 
     // User cannot overwrite PIN directly
     val (secondSaved, _) = LockManager.setPin(context, "5678")
     assertEquals(false, secondSaved)
     assertEquals("1234", LockManager.getPin(context))
+    assertEquals(true, LockManager.verifyPin(context, "1234"))
 
     // Only after partner approval clears the locked PIN can a new PIN be set
-    LockManager.clearPinAfterPartnerApproval(context)
+    BlockerManager.onPartnerApprovedPinReset(context)
+    assertEquals(true, BlockerManager.isPinResetAuthorized(context))
     assertEquals(false, LockManager.hasPin(context))
 
     val (thirdSaved, _) = LockManager.setPin(context, "5678")
+    BlockerManager.clearPinResetAuthorized(context)
     assertEquals(true, thirdSaved)
+    assertEquals(false, BlockerManager.isPinResetAuthorized(context))
     assertEquals("5678", LockManager.getPin(context))
+    assertEquals(true, LockManager.verifyPin(context, "5678"))
+    assertEquals(false, LockManager.verifyPin(context, "1234"))
   }
 }
