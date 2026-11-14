@@ -272,7 +272,11 @@ class ProtectionService : AccessibilityService() {
         recordAliveHeartbeat()
         try {
             val eventPkg = event.packageName?.toString() ?: ""
-            if (eventPkg == this.packageName) {
+            val eventCls = event.className?.toString() ?: ""
+            if (eventPkg == this.packageName || eventCls.contains("PinLockActivity", ignoreCase = true)) {
+                return
+            }
+            if (LockManager.isPinScreenCurrentlyActive()) {
                 return
             }
 
@@ -322,6 +326,9 @@ class ProtectionService : AccessibilityService() {
      * Returns true if the user is currently inside a Settings/System/Installer window.
      */
     private fun performFullActiveWindowScan(event: AccessibilityEvent?): Boolean {
+        if (LockManager.isPinScreenCurrentlyActive()) {
+            return false
+        }
         try {
             // Do not scan when device keyguard is locked
             val km = getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
@@ -334,8 +341,9 @@ class ProtectionService : AccessibilityService() {
         val activePkg = activeRoot?.packageName?.toString()
             ?: event?.packageName?.toString()
             ?: ""
+        val eventCls = event?.className?.toString() ?: ""
 
-        if (activePkg == this.packageName) {
+        if (activePkg == this.packageName || eventCls.contains("PinLockActivity", ignoreCase = true)) {
             return false
         }
 
@@ -351,7 +359,11 @@ class ProtectionService : AccessibilityService() {
                     val r = try { win.root } catch (e: Exception) { null }
                     if (r != null) {
                         val wPkg = r.packageName?.toString() ?: ""
-                        if (wPkg != this.packageName && !wPkg.contains("systemui")) {
+                        // If our own app / PinLockActivity window is on screen, whitelist and never auto-back
+                        if (wPkg == this.packageName) {
+                            return false
+                        }
+                        if (!wPkg.contains("systemui")) {
                             allRoots.add(r)
                         }
                     }
@@ -763,39 +775,35 @@ class ProtectionService : AccessibilityService() {
     }
 
     /**
-     * Executes instant multi-stage Auto-Back + launches PinLockActivity on top.
-     * Uses monotonic `SystemClock.elapsedRealtime()` so clock shifts never block execution.
+     * Executes single Auto-Back out of restricted Settings + launches PinLockActivity on top
+     * and pauses the guard while PinLockActivity is on screen.
      */
     private fun performAutoBackAndLock(reason: String) {
+        if (LockManager.isPinScreenCurrentlyActive() || LockManager.isCurrentlyUnlocked(this)) {
+            return
+        }
         val nowElapsed = SystemClock.elapsedRealtime()
-        if (nowElapsed >= lastBlockElapsedTime && (nowElapsed - lastBlockElapsedTime) < 280L) {
+        if (nowElapsed >= lastBlockElapsedTime && (nowElapsed - lastBlockElapsedTime) < 600L) {
             return
         }
         lastBlockElapsedTime = nowElapsed
 
-        // 1. Immediate Back action (0ms) to dismiss dialog/screen
-        performGlobalAction(GLOBAL_ACTION_BACK)
+        // 1. Mark PIN screen launching immediately so the guard pauses itself and never backs out of PinLockActivity
+        LockManager.markPinScreenLaunching()
 
-        // 2. Second Back action (+65ms) in case a modal dialog was open on top of the restricted Settings page
-        mainHandler.postDelayed({
-            try {
-                if (!LockManager.isCurrentlyUnlocked(this)) {
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                }
-            } catch (e: Exception) {}
-        }, 65L)
+        // 2. Single immediate Back action (0ms) to dismiss the restricted Settings dialog/screen BEFORE PinLockActivity opens
+        performGlobalAction(GLOBAL_ACTION_BACK)
 
         // 3. Trigger Guardian Alert
         triggerGuardianAlert(reason)
 
-        // 4. Launch PinLockActivity immediately (0ms), +110ms, and +260ms
-        launchPinLockScreenNow()
-        mainHandler.postDelayed({ launchPinLockScreenNow() }, 110L)
-        mainHandler.postDelayed({ launchPinLockScreenNow() }, 260L)
+        // 4. Launch PinLockActivity right after the back action so PinLockActivity stays on top until PIN entry or Cancel
+        mainHandler.postDelayed({ launchPinLockScreenNow() }, 45L)
     }
 
     private fun launchPinLockScreenNow() {
         try {
+            LockManager.markPinScreenLaunching()
             val pinIntent = Intent(this, PinLockActivity::class.java).apply {
                 addFlags(
                     Intent.FLAG_ACTIVITY_NEW_TASK or

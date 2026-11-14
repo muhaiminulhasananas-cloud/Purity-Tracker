@@ -10535,8 +10535,14 @@ fun HomeScreen(
         var partnerEmailHome by remember { mutableStateOf(BlockerManager.getPartnerEmail(context)) }
         var showHomeTurnOffDialog by remember { mutableStateOf(false) }
         var isSendingHomeTurnOff by remember { mutableStateOf(false) }
+        var showHomeChangePartnerDialog by remember { mutableStateOf(false) }
+        var isSendingHomePartnerChange by remember { mutableStateOf(false) }
+        var showHomeSetPartnerDialog by remember { mutableStateOf(false) }
+        var homePartnerEmailInput by remember { mutableStateOf("") }
+        var showHomeSetPinDialog by remember { mutableStateOf(false) }
+        var homePinInput by remember { mutableStateOf("") }
 
-        // Persistent continuous UI-thread guard loop (v1.3.4: no VPN prompt, no DNS prompt)
+        // Persistent continuous UI-thread guard loop (v1.3.5: no VPN prompt, no DNS prompt)
         LaunchedEffect(Unit) {
             while (true) {
                 try {
@@ -10709,6 +10715,187 @@ fun HomeScreen(
             )
         }
 
+        if (showHomeChangePartnerDialog) {
+            AlertDialog(
+                onDismissRequest = {
+                    if (!isSendingHomePartnerChange) showHomeChangePartnerDialog = false
+                },
+                containerColor = Color(0xFF0F172A),
+                titleContentColor = Color.White,
+                textContentColor = Color(0xFFCBD5E1),
+                title = {
+                    Text(
+                        text = "Change Accountability Partner",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 17.sp
+                    )
+                },
+                text = {
+                    Text(
+                        text = "Send an approval request to your current partner ($partnerEmailHome) to unlock changing the email.",
+                        fontSize = 13.5.sp,
+                        color = Color.White
+                    )
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { showHomeChangePartnerDialog = false },
+                        enabled = !isSendingHomePartnerChange
+                    ) {
+                        Text("Cancel", color = Color(0xFF94A3B8), fontWeight = FontWeight.SemiBold)
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            isSendingHomePartnerChange = true
+                            BlockerManager.sendPartnerChangeRequestToCurrentPartner(context) { _, message ->
+                                isSendingHomePartnerChange = false
+                                showHomeChangePartnerDialog = false
+                                android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        enabled = !isSendingHomePartnerChange,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("Send Request", color = Color(0xFF061018), fontWeight = FontWeight.Bold)
+                    }
+                }
+            )
+        }
+
+        if (showHomeSetPartnerDialog) {
+            AlertDialog(
+                onDismissRequest = { showHomeSetPartnerDialog = false },
+                containerColor = Color(0xFF0F172A),
+                titleContentColor = Color.White,
+                textContentColor = Color(0xFFCBD5E1),
+                title = {
+                    Text(
+                        text = "Set Accountability Partner Email",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 17.sp
+                    )
+                },
+                text = {
+                    OutlinedTextField(
+                        value = homePartnerEmailInput,
+                        onValueChange = { homePartnerEmailInput = it },
+                        placeholder = { Text("partner@example.com", fontSize = 12.sp) },
+                        singleLine = true,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Email
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFF38BDF8),
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.24f),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                },
+                dismissButton = {
+                    TextButton(onClick = { showHomeSetPartnerDialog = false }) {
+                        Text("Cancel", color = Color(0xFF94A3B8), fontWeight = FontWeight.SemiBold)
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            val err = BlockerManager.validateAndSavePartnerEmail(context, homePartnerEmailInput)
+                            if (err != null) {
+                                android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_LONG).show()
+                            } else {
+                                partnerEmailHome = BlockerManager.getPartnerEmail(context)
+                                homePartnerEmailInput = ""
+                                showHomeSetPartnerDialog = false
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Accountability partner email saved and locked.",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("Save", color = Color(0xFF061018), fontWeight = FontWeight.Bold)
+                    }
+                }
+            )
+        }
+
+        if (showHomeSetPinDialog && !hasPin) {
+            AlertDialog(
+                onDismissRequest = { showHomeSetPinDialog = false },
+                containerColor = Color(0xFF0F172A),
+                titleContentColor = Color.White,
+                textContentColor = Color(0xFFCBD5E1),
+                title = {
+                    Text(
+                        text = "Set 4-Digit Security PIN",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 17.sp
+                    )
+                },
+                text = {
+                    OutlinedTextField(
+                        value = homePinInput,
+                        onValueChange = { if (it.length <= 4 && it.all { c -> c.isDigit() }) homePinInput = it },
+                        label = { Text("4-Digit PIN") },
+                        singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFF10B981),
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.3f),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                },
+                dismissButton = {
+                    TextButton(onClick = { showHomeSetPinDialog = false }) {
+                        Text("Cancel", color = Color(0xFF94A3B8))
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            if (homePinInput.length != 4) {
+                                android.widget.Toast.makeText(context, "PIN must be 4 digits", android.widget.Toast.LENGTH_SHORT).show()
+                            } else {
+                                val (saved, _) = LockManager.setPin(context, homePinInput)
+                                if (saved) {
+                                    BlockerManager.clearPinResetAuthorized(context)
+                                    hasPin = LockManager.hasPin(context)
+                                    homePinInput = ""
+                                    showHomeSetPinDialog = false
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "4-digit Security PIN saved and locked.",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                } else {
+                                    android.widget.Toast.makeText(context, "Could not save PIN", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("Save PIN", color = Color(0xFF061018), fontWeight = FontWeight.Bold)
+                    }
+                }
+            )
+        }
+
         val isGuardConnected = isAccessibilityEnabled && isAccessibilityServiceRunning
         val isBatteryIgnored = isBatteryExempt
         val isPartnerLockedHome = partnerEmailHome.isNotBlank() && BlockerManager.hasValidPartnerEmail(context)
@@ -10727,12 +10914,20 @@ fun HomeScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
-                // Row 1: Accessibility (chip "Alive" / toggle)
+                // Row 1: Accessibility (chip "Alive" / toggle) — works IN PLACE on Home
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            AntiUninstallManager.requestAccessibilityService(context)
+                            if (!isGuardConnected) {
+                                AntiUninstallManager.requestAccessibilityService(context)
+                            } else {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Accessibility guard is alive and active",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
                         }
                         .padding(vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -10796,12 +10991,16 @@ fun HomeScreen(
 
                 HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
-                // Row 2: Accountability Partner Email (partner email as subtitle, chip "Locked")
+                // Row 2: Accountability Partner Email (partner email as subtitle, chip "Locked") — works IN PLACE on Home
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            onNavigateToBlocker?.invoke()
+                            if (isPartnerLockedHome) {
+                                showHomeChangePartnerDialog = true
+                            } else {
+                                showHomeSetPartnerDialog = true
+                            }
                         }
                         .padding(vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -10863,7 +11062,7 @@ fun HomeScreen(
 
                 HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
-                // Row 3: Block adult content (toggle)
+                // Row 3: Block adult content (toggle) — works IN PLACE on Home
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -10918,16 +11117,35 @@ fun HomeScreen(
                         checked = isBlockerActive,
                         onCheckedChange = { wantToEnable ->
                             if (wantToEnable) {
-                                if (!isPartnerLockedHome || !hasPin || !isGuardConnected) {
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        "Complete Partner Email, PIN, and Accessibility on Blocker page first",
-                                        android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                    onNavigateToBlocker?.invoke()
-                                } else {
-                                    BlockerManager.enableAdultBlocker(context)
-                                    isBlockerActive = true
+                                when {
+                                    !isPartnerLockedHome -> {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Save your Accountability Partner email first",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                        showHomeSetPartnerDialog = true
+                                    }
+                                    !hasPin -> {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Set your 4-digit PIN first",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                        showHomeSetPinDialog = true
+                                    }
+                                    !isGuardConnected -> {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Enable Purity Tracker in Accessibility Settings first",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                        AntiUninstallManager.requestAccessibilityService(context)
+                                    }
+                                    else -> {
+                                        BlockerManager.enableAdultBlocker(context)
+                                        isBlockerActive = true
+                                    }
                                 }
                             } else {
                                 showHomeTurnOffDialog = true
@@ -10944,7 +11162,7 @@ fun HomeScreen(
 
                 HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
-                // Bottom link: "See full Blocker page →"
+                // Bottom link: "See full Blocker page →" (THE ONLY navigation to Blocker page)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -10965,7 +11183,7 @@ fun HomeScreen(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Slim status line below the card (NOT a card)
+        // Slim status line below the card (NOT a card; kept straight and clean on one line, never splitting items)
         val deadItems = buildList {
             if (!isGuardConnected) add(if (isAccessibilityDeadButEnabled) "Accessibility dead" else "Accessibility off")
             if (!isBatteryIgnored) add("Battery restricted")
@@ -10976,59 +11194,148 @@ fun HomeScreen(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onNavigateToBlocker?.invoke() }
-                .padding(horizontal = 4.dp, vertical = 2.dp),
+                .padding(horizontal = 2.dp, vertical = 2.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = if (allHealthy) "Protection healthy" else "Protection issue: ${deadItems.joinToString(", ")}",
-                fontSize = 12.sp,
+                fontSize = 11.5.sp,
                 fontWeight = FontWeight.Bold,
-                color = if (allHealthy) Color(0xFF34D399) else Color(0xFFF87171)
+                color = if (allHealthy) Color(0xFF34D399) else Color(0xFFF87171),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
             )
             Spacer(modifier = Modifier.height(4.dp))
-            Row(
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
+            BoxWithConstraints(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.Center
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(if (isGuardConnected) Color(0xFF10B981) else Color(0xFFEF4444))
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "Accessibility alive",
-                    fontSize = 10.5.sp,
-                    color = if (isGuardConnected) Color(0xFF34D399) else Color(0xFFF87171)
-                )
-                Text(text = "  ·  ", fontSize = 10.5.sp, color = subtextColor)
-                Box(
-                    modifier = Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(if (isBatteryIgnored) Color(0xFF10B981) else Color(0xFFEF4444))
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "Battery unrestricted",
-                    fontSize = 10.5.sp,
-                    color = if (isBatteryIgnored) Color(0xFF34D399) else Color(0xFFF87171)
-                )
-                Text(text = "  ·  ", fontSize = 10.5.sp, color = subtextColor)
-                Box(
-                    modifier = Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(if (isOemAutoStartVisited) Color(0xFF10B981) else Color(0xFFEF4444))
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "Auto-start on",
-                    fontSize = 10.5.sp,
-                    color = if (isOemAutoStartVisited) Color(0xFF34D399) else Color(0xFFF87171)
-                )
+                if (maxWidth >= 280.dp) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isGuardConnected) Color(0xFF10B981) else Color(0xFFEF4444))
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = "Accessibility alive",
+                                fontSize = 9.5.sp,
+                                color = if (isGuardConnected) Color(0xFF34D399) else Color(0xFFF87171),
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        Text(
+                            text = " · ",
+                            fontSize = 9.5.sp,
+                            color = subtextColor,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isBatteryIgnored) Color(0xFF10B981) else Color(0xFFEF4444))
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = "Battery unrestricted",
+                                fontSize = 9.5.sp,
+                                color = if (isBatteryIgnored) Color(0xFF34D399) else Color(0xFFF87171),
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        Text(
+                            text = " · ",
+                            fontSize = 9.5.sp,
+                            color = subtextColor,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isOemAutoStartVisited) Color(0xFF10B981) else Color(0xFFEF4444))
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = "Auto-start on",
+                                fontSize = 9.5.sp,
+                                color = if (isOemAutoStartVisited) Color(0xFF34D399) else Color(0xFFF87171),
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                } else {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isGuardConnected) Color(0xFF10B981) else Color(0xFFEF4444))
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Accessibility alive",
+                                fontSize = 10.sp,
+                                color = if (isGuardConnected) Color(0xFF34D399) else Color(0xFFF87171),
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isBatteryIgnored) Color(0xFF10B981) else Color(0xFFEF4444))
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Battery unrestricted",
+                                fontSize = 10.sp,
+                                color = if (isBatteryIgnored) Color(0xFF34D399) else Color(0xFFF87171),
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isOemAutoStartVisited) Color(0xFF10B981) else Color(0xFFEF4444))
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Auto-start on",
+                                fontSize = 10.sp,
+                                color = if (isOemAutoStartVisited) Color(0xFF34D399) else Color(0xFFF87171),
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                }
             }
         }
     }

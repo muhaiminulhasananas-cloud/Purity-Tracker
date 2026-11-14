@@ -31,6 +31,16 @@ import androidx.compose.ui.unit.sp
 class PinLockActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        LockManager.markPinScreenActive(true)
+
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : androidx.activity.OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    // Never auto-back out of the PIN screen; keep it open until the user enters the PIN or taps Cancel.
+                }
+            }
+        )
 
         setContent {
             var isPinConfigured by remember { mutableStateOf(LockManager.hasPin(this@PinLockActivity)) }
@@ -240,6 +250,7 @@ class PinLockActivity : ComponentActivity() {
                                             val (ok, key) = LockManager.setPin(this@PinLockActivity, cleanPin)
                                             if (ok) {
                                                 LockManager.unlockForSeconds(this@PinLockActivity, 60)
+                                                LockManager.markPinScreenActive(false)
                                                 Toast.makeText(
                                                     this@PinLockActivity,
                                                     if (isBn) "পিন সেট হয়েছে ও ১ মিনিটের জন্য আনলক করা হয়েছে" else "PIN set & unlocked for 1 minute",
@@ -251,6 +262,7 @@ class PinLockActivity : ComponentActivity() {
                                     } else {
                                         if (LockManager.verifyPin(this@PinLockActivity, pinInput)) {
                                             LockManager.unlockForSeconds(this@PinLockActivity, 60)
+                                            LockManager.markPinScreenActive(false)
                                             Toast.makeText(
                                                 this@PinLockActivity,
                                                 if (isBn) "সঠিক পিন! ১ মিনিটের জন্য আনলক করা হয়েছে" else "Correct PIN! Unlocked for 1 minute",
@@ -259,12 +271,7 @@ class PinLockActivity : ComponentActivity() {
                                             finish()
                                         } else {
                                             isError = true
-                                            customErrorMessage = if (isBn) "ভুল পিন কোড!" else "Incorrect PIN"
-                                            Toast.makeText(
-                                                this@PinLockActivity,
-                                                if (isBn) "ভুল পিন কোড!" else "Incorrect PIN",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
+                                            customErrorMessage = if (isBn) "ভুল পিন কোড! সঠিক পিন লিখুন।" else "Incorrect PIN! Please try again."
                                             pinInput = ""
                                         }
                                     }
@@ -322,6 +329,7 @@ class PinLockActivity : ComponentActivity() {
 
                             TextButton(
                                 onClick = {
+                                    LockManager.markPinScreenActive(false)
                                     val homeIntent = Intent(Intent.ACTION_MAIN).apply {
                                         addCategory(Intent.CATEGORY_HOME)
                                         flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -331,7 +339,7 @@ class PinLockActivity : ComponentActivity() {
                                 }
                             ) {
                                 Text(
-                                    text = if (isBn) "ফিরে যান (হোম স্ক্রিন)" else "Go Back (Home)",
+                                    text = if (isBn) "বাতিল করুন (হোম স্ক্রিন)" else "Cancel (Go Home)",
                                     color = Color(0xFF94A3B8),
                                     fontSize = 13.sp
                                 )
@@ -680,6 +688,7 @@ class PinLockActivity : ComponentActivity() {
                                         LockManager.shareGuardianKey(this@PinLockActivity, it)
                                     }
                                     showSuccessKeyDialog = false
+                                    LockManager.markPinScreenActive(false)
                                     finish()
                                 },
                                 shape = CircleShape,
@@ -697,6 +706,7 @@ class PinLockActivity : ComponentActivity() {
                             TextButton(
                                 onClick = {
                                     showSuccessKeyDialog = false
+                                    LockManager.markPinScreenActive(false)
                                     finish()
                                 }
                             ) {
@@ -709,13 +719,25 @@ class PinLockActivity : ComponentActivity() {
         }
     }
 
-    override fun onBackPressed() {
-        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
-            addCategory(Intent.CATEGORY_HOME)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+    override fun onStart() {
+        super.onStart()
+        LockManager.markPinScreenActive(true)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        LockManager.markPinScreenActive(true)
+    }
+
+    override fun onDestroy() {
+        if (isFinishing) {
+            LockManager.markPinScreenActive(false)
         }
-        startActivity(homeIntent)
-        super.onBackPressed()
-        finish()
+        super.onDestroy()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        // Ignore system/accessibility back events so the PIN screen stays open until PIN entry or explicit Cancel.
     }
 }

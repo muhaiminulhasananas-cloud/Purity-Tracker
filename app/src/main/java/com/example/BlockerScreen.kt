@@ -604,7 +604,11 @@ fun BlockerScreen(
                     modifier = Modifier
                         .testTag("turn_on_accessibility_button")
                         .clickable {
-                            AntiUninstallManager.requestAccessibilityService(context)
+                            if (!isAccessibilityAlive) {
+                                AntiUninstallManager.requestAccessibilityService(context)
+                            } else {
+                                topStatusBanner = "Accessibility guard is alive and active."
+                            }
                         },
                     trailing = {
                         CompactStatusChip(

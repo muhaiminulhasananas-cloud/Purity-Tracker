@@ -132,4 +132,41 @@ class ExampleRobolectricTest {
     assertEquals(true, LockManager.verifyPin(context, "5678"))
     assertEquals(false, LockManager.verifyPin(context, "1234"))
   }
+
+  @Test
+  fun `PinLockActivity pauses guard while visible, never auto-backs, and unlocks guard for 60s on correct PIN`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    context.getSharedPreferences("AppLockPrefs", Context.MODE_PRIVATE).edit().clear().commit()
+    LockManager.lockImmediately(context)
+    LockManager.markPinScreenActive(false)
+
+    LockManager.setPin(context, "4321")
+    assertEquals(false, LockManager.isCurrentlyUnlocked(context))
+
+    // Simulate guard triggering auto-back and launching PinLockActivity
+    LockManager.markPinScreenLaunching()
+    assertEquals(true, LockManager.isPinScreenCurrentlyActive())
+
+    val controller = org.robolectric.Robolectric.buildActivity(PinLockActivity::class.java).create().start().resume()
+    val activity = controller.get()
+    assertEquals(true, LockManager.isPinScreenCurrentlyActive())
+    assertEquals(false, activity.isFinishing)
+
+    // Back press (e.g. stray auto-back) must NOT close PinLockActivity
+    activity.onBackPressedDispatcher.onBackPressed()
+    assertEquals(false, activity.isFinishing)
+    assertEquals(true, LockManager.isPinScreenCurrentlyActive())
+
+    // Wrong PIN must not unlock or close the PIN screen
+    assertEquals(false, LockManager.verifyPin(context, "9999"))
+    assertEquals(false, LockManager.isCurrentlyUnlocked(context))
+    assertEquals(true, LockManager.isPinScreenCurrentlyActive())
+
+    // Correct PIN unlocks guard for 60 seconds and closes the PIN screen
+    assertEquals(true, LockManager.verifyPin(context, "4321"))
+    LockManager.unlockForSeconds(context, 60)
+    LockManager.markPinScreenActive(false)
+    assertEquals(true, LockManager.isCurrentlyUnlocked(context))
+    assertEquals(false, LockManager.isPinScreenCurrentlyActive())
+  }
 }

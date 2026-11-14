@@ -342,6 +342,41 @@ object LockManager {
     @Volatile
     private var unlockedUntilElapsedRealtime: Long = 0L
 
+    @Volatile
+    private var pinScreenVisible: Boolean = false
+
+    @Volatile
+    private var pinScreenLaunchGraceUntilElapsed: Long = 0L
+
+    /**
+     * Marks that the guard is launching PinLockActivity right now so the guard
+     * immediately pauses auto-back and never backs out of its own PIN screen.
+     */
+    fun markPinScreenLaunching() {
+        pinScreenVisible = true
+        pinScreenLaunchGraceUntilElapsed = android.os.SystemClock.elapsedRealtime() + 2500L
+    }
+
+    /**
+     * Updates whether PinLockActivity is actively displayed on screen.
+     */
+    fun markPinScreenActive(active: Boolean) {
+        pinScreenVisible = active
+        if (!active) {
+            pinScreenLaunchGraceUntilElapsed = 0L
+        }
+    }
+
+    /**
+     * Returns true whenever PinLockActivity is launching or visible on screen.
+     * While true, ProtectionService must pause auto-back completely.
+     */
+    fun isPinScreenCurrentlyActive(): Boolean {
+        if (pinScreenVisible) return true
+        val now = android.os.SystemClock.elapsedRealtime()
+        return pinScreenLaunchGraceUntilElapsed > now && (pinScreenLaunchGraceUntilElapsed - now) <= 3000L
+    }
+
     fun unlockForMinutes(context: Context, minutes: Int) {
         val clampedSeconds = (minutes * 60).coerceIn(1, 60)
         unlockForSeconds(context, clampedSeconds)
@@ -352,6 +387,8 @@ object LockManager {
         val nowWall = System.currentTimeMillis()
         val unlockWallTime = nowWall + (safeSeconds * 1000L)
         unlockedUntilElapsedRealtime = android.os.SystemClock.elapsedRealtime() + (safeSeconds * 1000L)
+        pinScreenVisible = false
+        pinScreenLaunchGraceUntilElapsed = 0L
         try {
             getPrefs(context).edit().putLong(KEY_UNLOCKED_UNTIL, unlockWallTime).apply()
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
