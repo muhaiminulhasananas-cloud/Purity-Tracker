@@ -102,45 +102,63 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `PIN cannot be overwritten alone and unlocks only after partner approval`() {
+  fun `user cannot set or reset PIN alone and partner-set PIN hash round-trip works end to end`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     context.getSharedPreferences("AppLockPrefs", Context.MODE_PRIVATE).edit().clear().commit()
     context.getSharedPreferences("BlockerPrefs", Context.MODE_PRIVATE).edit().clear().commit()
 
-    val (firstSaved, _) = LockManager.setPin(context, "1234")
-    assertEquals(true, firstSaved)
-    assertEquals("1234", LockManager.getPin(context))
-    assertEquals(true, LockManager.verifyPin(context, "1234"))
-    assertEquals(false, LockManager.verifyPin(context, "5678"))
-
-    // User cannot overwrite PIN directly
-    val (secondSaved, _) = LockManager.setPin(context, "5678")
-    assertEquals(false, secondSaved)
-    assertEquals("1234", LockManager.getPin(context))
-    assertEquals(true, LockManager.verifyPin(context, "1234"))
-
-    // Only after partner approval clears the locked PIN can a new PIN be set
-    BlockerManager.onPartnerApprovedPinReset(context)
-    assertEquals(true, BlockerManager.isPinResetAuthorized(context))
+    // 1. User can NEVER set or reset a PIN alone
+    val (selfSaved, selfKey) = LockManager.setPin(context, "9999")
+    assertEquals(false, selfSaved)
+    org.junit.Assert.assertNull(selfKey)
     assertEquals(false, LockManager.hasPin(context))
+    assertEquals(false, LockManager.verifyPin(context, "9999"))
+    org.junit.Assert.assertTrue(
+      LockManager.resetPinWithGuardianKey(context, "G-1234-AB", "1234") is ResetResult.InvalidKey
+    )
 
-    val (thirdSaved, _) = LockManager.setPin(context, "5678")
-    BlockerManager.clearPinResetAuthorized(context)
-    assertEquals(true, thirdSaved)
-    assertEquals(false, BlockerManager.isPinResetAuthorized(context))
-    assertEquals("5678", LockManager.getPin(context))
+    // 2. Suppose partner previously set PIN "5678" using token "tok_old_abc"
+    val oldToken = "tok_old_abc"
+    val oldHash = LockManager.computeSaltedPinHash("5678", oldToken)
+    assertEquals(true, LockManager.applyPartnerPinHash(context, oldHash, oldToken))
+    assertEquals(true, LockManager.hasPin(context))
     assertEquals(true, LockManager.verifyPin(context, "5678"))
     assertEquals(false, LockManager.verifyPin(context, "1234"))
+    org.junit.Assert.assertNull(LockManager.getPin(context)) // never readable in plain text
+
+    // 3. Round-trip: user requests reset -> partner sets new PIN "1234" on approve.html with request token
+    val newRequestToken = "tok_new_reset_xyz987"
+    val partnerPinHash = LockManager.computeSaltedPinHash("1234", newRequestToken)
+    assertEquals(64, partnerPinHash.length)
+
+    // App listener receives approved pin_reset with pinHash and applies it immediately
+    BlockerManager.onPartnerApprovedPinReset(context, partnerPinHash, newRequestToken)
+
+    // 4. App accepts "1234", rejects old PIN "5678", and notifies that partner reset the PIN
+    assertEquals(true, LockManager.hasPin(context))
+    assertEquals(true, LockManager.verifyPin(context, "1234"))
+    assertEquals(false, LockManager.verifyPin(context, "5678"))
+    org.junit.Assert.assertNull(LockManager.getPin(context))
+    assertEquals(true, BlockerManager.consumePartnerPinResetNotice(context))
+    assertEquals(false, BlockerManager.consumePartnerPinResetNotice(context))
+
+    // 5. User still cannot overwrite the partner-set PIN himself
+    val (overwriteAttempt, _) = LockManager.setPin(context, "0000")
+    assertEquals(false, overwriteAttempt)
+    assertEquals(true, LockManager.verifyPin(context, "1234"))
+    assertEquals(false, LockManager.verifyPin(context, "0000"))
   }
 
   @Test
-  fun `PinLockActivity pauses guard while visible, never auto-backs, and unlocks guard for 60s on correct PIN`() {
+  fun `PinLockActivity pauses guard while visible, never auto-backs, and unlocks guard for 60s on correct partner PIN`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     context.getSharedPreferences("AppLockPrefs", Context.MODE_PRIVATE).edit().clear().commit()
     LockManager.lockImmediately(context)
     LockManager.markPinScreenActive(false)
 
-    LockManager.setPin(context, "4321")
+    val saltToken = "tok_guard_test_001"
+    val hash = LockManager.computeSaltedPinHash("4321", saltToken)
+    LockManager.applyPartnerPinHash(context, hash, saltToken)
     assertEquals(false, LockManager.isCurrentlyUnlocked(context))
 
     // Simulate guard triggering auto-back and launching PinLockActivity
@@ -162,7 +180,7 @@ class ExampleRobolectricTest {
     assertEquals(false, LockManager.isCurrentlyUnlocked(context))
     assertEquals(true, LockManager.isPinScreenCurrentlyActive())
 
-    // Correct PIN unlocks guard for 60 seconds and closes the PIN screen
+    // Correct partner PIN unlocks guard for 60 seconds and closes the PIN screen
     assertEquals(true, LockManager.verifyPin(context, "4321"))
     LockManager.unlockForSeconds(context, 60)
     LockManager.markPinScreenActive(false)

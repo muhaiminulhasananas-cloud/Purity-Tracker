@@ -83,9 +83,8 @@ fun BlockerScreen(
     var showChangePartnerDialog by remember { mutableStateOf(false) }
     var isSendingPartnerChangeRequest by remember { mutableStateOf(false) }
 
-    // 2. PIN & Forgot PIN state
+    // 2. PIN & Forgot PIN state (Partner sets the PIN; user can never set or reset PIN alone)
     var hasPin by remember { mutableStateOf(LockManager.hasPin(context)) }
-    var showSetPinModal by remember { mutableStateOf(false) }
     var pendingPinResetId by remember { mutableStateOf(BlockerManager.getPendingPinResetRequestId(context)) }
     var isSendingPinResetRequest by remember { mutableStateOf(false) }
 
@@ -132,10 +131,10 @@ fun BlockerScreen(
         isOemAutoStartOn = states[9] as Boolean
         isDeviceAdminActive = states[10] as Boolean
 
-        val pinResetAuthorized = BlockerManager.isPinResetAuthorized(context)
-        if (pinResetAuthorized && !hasPin && !showSetPinModal) {
-            showSetPinModal = true
-            topStatusBanner = "Partner authorized PIN reset. Set your new 4-digit PIN."
+        if (BlockerManager.consumePartnerPinResetNotice(context)) {
+            hasPin = LockManager.hasPin(context)
+            pendingPinResetId = null
+            topStatusBanner = "Your PIN was reset by your partner"
         }
 
         if (pendingTurnOnAfterAccessibility && nowAccAlive && hasPin && BlockerManager.hasValidPartnerEmail(context)) {
@@ -172,10 +171,10 @@ fun BlockerScreen(
             }
             BlockerManager.ensurePinResetApprovalListener(context) { status ->
                 if (status == "approved") {
-                    hasPin = false
+                    BlockerManager.consumePartnerPinResetNotice(context)
+                    hasPin = LockManager.hasPin(context)
                     pendingPinResetId = null
-                    topStatusBanner = "Partner authorized PIN reset. Set your new 4-digit PIN."
-                    showSetPinModal = true
+                    topStatusBanner = "Your PIN was reset by your partner"
                 } else if (status == "denied") {
                     pendingPinResetId = null
                     topStatusBanner = "Partner denied the PIN reset request."
@@ -200,9 +199,10 @@ fun BlockerScreen(
                 isOemAutoStartOn = AntiUninstallManager.isOemAutoStartVisited(context)
                 isDeviceAdminActive = AntiUninstallManager.isDeviceAdminActive(context)
 
-                if (BlockerManager.isPinResetAuthorized(context) && !hasPin) {
-                    showSetPinModal = true
-                    topStatusBanner = "Partner authorized PIN reset. Set your new 4-digit PIN."
+                if (BlockerManager.consumePartnerPinResetNotice(context)) {
+                    hasPin = LockManager.hasPin(context)
+                    pendingPinResetId = null
+                    topStatusBanner = "Your PIN was reset by your partner"
                 }
 
                 if (pendingTurnOnAfterAccessibility && isAccessibilityAlive && hasPin && BlockerManager.hasValidPartnerEmail(context)) {
@@ -224,7 +224,7 @@ fun BlockerScreen(
             "Disable request sent to $savedPartnerEmail. Waiting for partner approval."
         !pendingPartnerChangeId.isNullOrBlank() ->
             "Partner change request sent to $savedPartnerEmail. Waiting for partner approval."
-        !pendingPinResetId.isNullOrBlank() && hasPin ->
+        !pendingPinResetId.isNullOrBlank() ->
             "PIN reset request sent — waiting for partner approval"
         else -> null
     }
@@ -445,20 +445,41 @@ fun BlockerScreen(
                 HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
                 // -----------------------------------------------------------------
-                // ROW 2: App Security PIN (chip "PIN Set" + "Forgot PIN?" link)
+                // ROW 2: App Security PIN (chip "PIN Set" + "Forgot PIN?" link — Partner sets PIN)
                 // -----------------------------------------------------------------
+                val triggerPartnerPinReset: () -> Unit = {
+                    if (!BlockerManager.hasValidPartnerEmail(context)) {
+                        Toast.makeText(
+                            context,
+                            "Save an accountability partner email first.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else if (!isSendingPinResetRequest) {
+                        isSendingPinResetRequest = true
+                        BlockerManager.sendPinResetRequestToPartner(context) { success, message ->
+                            isSendingPinResetRequest = false
+                            pendingPinResetId = BlockerManager.getPendingPinResetRequestId(context)
+                            if (success) {
+                                topStatusBanner = message
+                            } else {
+                                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                }
+
                 CompactBlockerRow(
                     icon = Icons.Outlined.Key,
                     iconTint = Color(0xFFFBBF24),
                     title = "App Security PIN",
-                    subtitle = if (hasPin) "4-digit PIN locked" else "Tap to set 4-digit PIN",
+                    subtitle = if (hasPin) "Partner-set PIN locked" else "Partner sets PIN via email",
                     titleColor = titleColor,
                     subtitleColor = descColor,
                     modifier = Modifier
                         .testTag("blocker_set_pin_button")
                         .clickable {
                             if (!hasPin) {
-                                showSetPinModal = true
+                                triggerPartnerPinReset()
                             }
                         },
                     trailing = {
@@ -466,42 +487,23 @@ fun BlockerScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (hasPin) {
-                                Text(
-                                    text = if (isSendingPinResetRequest) "Sending..." else "Forgot PIN?",
-                                    color = Color(0xFF38BDF8),
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    textDecoration = TextDecoration.Underline,
-                                    modifier = Modifier
-                                        .testTag("forgot_pin_link")
-                                        .clickable(enabled = !isSendingPinResetRequest) {
-                                            if (!BlockerManager.hasValidPartnerEmail(context)) {
-                                                Toast.makeText(
-                                                    context,
-                                                    "Save an accountability partner email first.",
-                                                    Toast.LENGTH_LONG
-                                                ).show()
-                                                return@clickable
-                                            }
-                                            isSendingPinResetRequest = true
-                                            BlockerManager.sendPinResetRequestToPartner(context) { success, message ->
-                                                isSendingPinResetRequest = false
-                                                pendingPinResetId = BlockerManager.getPendingPinResetRequestId(context)
-                                                if (success) {
-                                                    topStatusBanner = message
-                                                } else {
-                                                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-                                                }
-                                            }
-                                        }
-                                )
-                            }
+                            Text(
+                                text = if (isSendingPinResetRequest) "Sending..." else "Forgot PIN?",
+                                color = Color(0xFF38BDF8),
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                textDecoration = TextDecoration.Underline,
+                                modifier = Modifier
+                                    .testTag("forgot_pin_link")
+                                    .clickable(enabled = !isSendingPinResetRequest) {
+                                        triggerPartnerPinReset()
+                                    }
+                            )
                             CompactStatusChip(
-                                text = if (hasPin) "PIN Set" else "Set PIN",
+                                text = if (hasPin) "PIN Set" else "Partner PIN",
                                 isPositive = hasPin,
                                 modifier = if (!hasPin) {
-                                    Modifier.clickable { showSetPinModal = true }
+                                    Modifier.clickable(enabled = !isSendingPinResetRequest) { triggerPartnerPinReset() }
                                 } else {
                                     Modifier
                                 }
@@ -536,10 +538,9 @@ fun BlockerScreen(
                                         return@Switch
                                     }
                                     if (!hasPin) {
-                                        showSetPinModal = true
                                         Toast.makeText(
                                             context,
-                                            "Set your 4-digit PIN first",
+                                            "Tap Forgot PIN? so your partner can set your PIN first",
                                             Toast.LENGTH_LONG
                                         ).show()
                                         return@Switch
@@ -872,20 +873,6 @@ fun BlockerScreen(
             }
         )
     }
-
-    // =========================================================================
-    // DIALOG: Set 4-Digit Security PIN (Only when no PIN is set or after Partner reset approval)
-    // =========================================================================
-    if (showSetPinModal && !hasPin) {
-        BlockerPinSetupDialog(
-            onDismiss = { showSetPinModal = false },
-            onPinSaved = {
-                hasPin = LockManager.hasPin(context)
-                showSetPinModal = false
-                topStatusBanner = "4-digit Security PIN saved and locked."
-            }
-        )
-    }
 }
 
 @Composable
@@ -977,74 +964,4 @@ private fun CompactStatusChip(
             fontWeight = FontWeight.Bold
         )
     }
-}
-
-@Composable
-private fun BlockerPinSetupDialog(
-    onDismiss: () -> Unit,
-    onPinSaved: () -> Unit
-) {
-    val context = LocalContext.current
-    var pinInput by remember { mutableStateOf("") }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF0F172A),
-        titleContentColor = Color.White,
-        textContentColor = Color(0xFFCBD5E1),
-        title = {
-            Text(
-                text = "Set 4-Digit Security PIN",
-                fontWeight = FontWeight.Bold,
-                fontSize = 17.sp
-            )
-        },
-        text = {
-            OutlinedTextField(
-                value = pinInput,
-                onValueChange = { if (it.length <= 4 && it.all { c -> c.isDigit() }) pinInput = it },
-                label = { Text("4-Digit PIN") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color(0xFF10B981),
-                    unfocusedBorderColor = Color.White.copy(alpha = 0.3f),
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
-                )
-            )
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = Color(0xFF94A3B8))
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    if (pinInput.length != 4) {
-                        Toast.makeText(context, "PIN must be 4 digits", Toast.LENGTH_SHORT).show()
-                    } else {
-                        val (saved, _) = LockManager.setPin(context, pinInput)
-                        if (saved) {
-                            BlockerManager.clearPinResetAuthorized(context)
-                            onPinSaved()
-                        } else {
-                            Toast.makeText(context, "Could not save PIN", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                shape = RoundedCornerShape(10.dp)
-            ) {
-                Text(
-                    text = "Save PIN",
-                    color = Color(0xFF061018),
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-    )
 }

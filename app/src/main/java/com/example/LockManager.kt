@@ -1,10 +1,9 @@
 package com.example
 
-import android.app.Activity
 import android.content.Context
-import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Build
+import java.security.MessageDigest
 
 sealed class ResetResult {
     data class Success(val newGuardianKey: String) : ResetResult()
@@ -16,28 +15,26 @@ sealed class ResetResult {
 object LockManager {
     private const val PREFS_NAME = "AppLockPrefs"
     private const val KEY_PIN = "security_pin"
+    private const val KEY_PIN_HASH = "security_pin_hash"
+    private const val KEY_PIN_SALT = "security_pin_salt"
     private const val KEY_PIN_PERMANENTLY_LOCKED = "security_pin_permanently_locked"
     private const val KEY_GUARDIAN_KEY = "guardian_recovery_key"
     private const val KEY_FAILED_RESET_ATTEMPTS = "failed_reset_attempts"
     private const val KEY_RESET_LOCKOUT_UNTIL = "reset_lockout_until_time"
     private const val KEY_UNLOCKED_UNTIL = "unlocked_until_time"
 
-    private const val MAX_RESET_ATTEMPTS = 5
-    private const val LOCKOUT_DURATION_MS = 30 * 60 * 1000L // 30 minutes lockout
-
     private fun getPrefs(context: Context): SharedPreferences {
         val defaultPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             val protectedContext = context.createDeviceProtectedStorageContext()
             val protectedPrefs = protectedContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val defPin = defaultPrefs.getString(KEY_PIN, null)
-            val protPin = protectedPrefs.getString(KEY_PIN, null)
-            // Migrate to protected storage if not already there
-            if (protPin.isNullOrBlank() && !defPin.isNullOrBlank()) {
-                val defKey = defaultPrefs.getString(KEY_GUARDIAN_KEY, null)
+            val defHash = defaultPrefs.getString(KEY_PIN_HASH, null)
+            val protHash = protectedPrefs.getString(KEY_PIN_HASH, null)
+            if (protHash.isNullOrBlank() && !defHash.isNullOrBlank()) {
+                val defSalt = defaultPrefs.getString(KEY_PIN_SALT, null)
                 protectedPrefs.edit()
-                    .putString(KEY_PIN, defPin)
-                    .putString(KEY_GUARDIAN_KEY, defKey)
+                    .putString(KEY_PIN_HASH, defHash)
+                    .putString(KEY_PIN_SALT, defSalt)
                     .putBoolean(KEY_PIN_PERMANENTLY_LOCKED, true)
                     .apply()
             }
@@ -60,68 +57,96 @@ object LockManager {
     }
 
     /**
-     * Normalizes a Guardian Key (removes spaces, hyphens, uppercases)
-     * for fail-safe verification.
+     * Computes SHA-256 hex digest of "<saltToken>:<cleanPin>".
+     * Matches the exact Web Crypto SHA-256 computation in approve.html.
      */
-    fun normalizeKey(input: String): String {
-        return input.trim().uppercase().replace(" ", "").replace("-", "")
-    }
-
-    /**
-     * Generates a cryptographically strong, memorable 8-char Guardian Recovery Key.
-     * Example: "G-4982-XP"
-     */
-    fun generateGuardianKey(): String {
-        val randomNum = (1000..9999).random()
-        val letters = ('A'..'Z').shuffled().take(2).joinToString("")
-        return "G-$randomNum-$letters"
-    }
-
-    /**
-     * Sets the PIN permanently for the first time and generates a unique Guardian Recovery Key.
-     * CRITICAL RULE: Once set, the PIN CANNOT be changed, edited, or overwritten by the user!
-     * Returns Pair(success, guardianKey).
-     */
-    fun setPin(context: Context, pin: String): Pair<Boolean, String?> {
-        if (hasPin(context)) {
-            // Already set: Permanently locked and immutable!
-            return Pair(false, null)
-        }
+    fun computeSaltedPinHash(pin: String, saltToken: String): String {
         val cleanPin = normalizeDigits(pin)
-        if (cleanPin.length < 4) {
-            return Pair(false, null)
+        val cleanSalt = saltToken.trim()
+        val payload = "$cleanSalt:$cleanPin"
+        val digest = MessageDigest.getInstance("SHA-256").digest(payload.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Applies the partner-submitted SHA-256 PIN hash and one-time request token salt.
+     * Immediately invalidates any previous PIN hash or legacy plain-text PIN.
+     * The plain-text PIN is NEVER stored or visible anywhere in the app.
+     */
+    fun applyPartnerPinHash(context: Context, pinHash: String, saltToken: String): Boolean {
+        val cleanHash = pinHash.trim().lowercase()
+        val cleanSalt = saltToken.trim()
+        if (cleanHash.length != 64 || !cleanHash.all { it in '0'..'9' || it in 'a'..'f' } || cleanSalt.isEmpty()) {
+            return false
         }
 
-        val guardianKey = generateGuardianKey()
-
-        // Save in both default and protected prefs for safety
         try {
             val defaultPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             defaultPrefs.edit()
-                .putString(KEY_PIN, cleanPin)
-                .putString(KEY_GUARDIAN_KEY, guardianKey)
+                .putString(KEY_PIN_HASH, cleanHash)
+                .putString(KEY_PIN_SALT, cleanSalt)
+                .remove(KEY_PIN)
+                .remove(KEY_GUARDIAN_KEY)
                 .putBoolean(KEY_PIN_PERMANENTLY_LOCKED, true)
                 .putInt(KEY_FAILED_RESET_ATTEMPTS, 0)
                 .putLong(KEY_RESET_LOCKOUT_UNTIL, 0L)
-                .apply()
+                .commit()
         } catch (e: Exception) {}
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             try {
-                val protectedPrefs = context.createDeviceProtectedStorageContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val protectedPrefs = context.createDeviceProtectedStorageContext()
+                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 protectedPrefs.edit()
-                    .putString(KEY_PIN, cleanPin)
-                    .putString(KEY_GUARDIAN_KEY, guardianKey)
+                    .putString(KEY_PIN_HASH, cleanHash)
+                    .putString(KEY_PIN_SALT, cleanSalt)
+                    .remove(KEY_PIN)
+                    .remove(KEY_GUARDIAN_KEY)
                     .putBoolean(KEY_PIN_PERMANENTLY_LOCKED, true)
                     .putInt(KEY_FAILED_RESET_ATTEMPTS, 0)
                     .putLong(KEY_RESET_LOCKOUT_UNTIL, 0L)
-                    .apply()
+                    .commit()
             } catch (e: Exception) {}
         }
-        return Pair(true, guardianKey)
+        return true
     }
 
+    /**
+     * Self-setting or overwriting the PIN in the app is strictly forbidden in v1.3.6+.
+     * Only the accountability partner can set or reset the PIN via the tokenized approval link.
+     */
+    fun setPin(context: Context, pin: String): Pair<Boolean, String?> {
+        return Pair(false, null)
+    }
+
+    /**
+     * Never exposes the PIN in plain text.
+     */
     fun getPin(context: Context): String? {
+        return null
+    }
+
+    fun getPinHash(context: Context): String? {
+        val prefs = getPrefs(context)
+        var hash = prefs.getString(KEY_PIN_HASH, null)
+        if (hash.isNullOrBlank()) {
+            val defaultPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            hash = defaultPrefs.getString(KEY_PIN_HASH, null)
+        }
+        return hash?.trim()?.takeIf { it.length == 64 }
+    }
+
+    fun getPinSalt(context: Context): String? {
+        val prefs = getPrefs(context)
+        var salt = prefs.getString(KEY_PIN_SALT, null)
+        if (salt.isNullOrBlank()) {
+            val defaultPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            salt = defaultPrefs.getString(KEY_PIN_SALT, null)
+        }
+        return salt?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun getLegacyPlainPin(context: Context): String? {
         val prefs = getPrefs(context)
         var pin = prefs.getString(KEY_PIN, null)
         if (pin.isNullOrBlank()) {
@@ -132,7 +157,10 @@ object LockManager {
     }
 
     fun hasPin(context: Context): Boolean {
-        return !getPin(context).isNullOrBlank()
+        if (!getPinHash(context).isNullOrBlank() && !getPinSalt(context).isNullOrBlank()) {
+            return true
+        }
+        return !getLegacyPlainPin(context).isNullOrBlank()
     }
 
     fun isPinPermanentlyLocked(context: Context): Boolean {
@@ -140,203 +168,54 @@ object LockManager {
     }
 
     /**
-     * Called ONLY when the Accountability Partner clicks the tokenized approval link
-     * for a `reset_pin` request (`status == "approved"` in Firestore).
-     * Never callable directly by the user alone.
+     * Disabled: the user can never clear the PIN to set one themselves.
+     * Only applyPartnerPinHash() updates the PIN when the partner submits pinHash.
      */
     fun clearPinAfterPartnerApproval(context: Context) {
-        try {
-            val defaultPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            defaultPrefs.edit()
-                .remove(KEY_PIN)
-                .putBoolean(KEY_PIN_PERMANENTLY_LOCKED, false)
-                .putInt(KEY_FAILED_RESET_ATTEMPTS, 0)
-                .putLong(KEY_RESET_LOCKOUT_UNTIL, 0L)
-                .apply()
-        } catch (e: Exception) {}
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            try {
-                val protectedPrefs = context.createDeviceProtectedStorageContext()
-                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                protectedPrefs.edit()
-                    .remove(KEY_PIN)
-                    .putBoolean(KEY_PIN_PERMANENTLY_LOCKED, false)
-                    .putInt(KEY_FAILED_RESET_ATTEMPTS, 0)
-                    .putLong(KEY_RESET_LOCKOUT_UNTIL, 0L)
-                    .apply()
-            } catch (e: Exception) {}
-        }
+        // No-op: self-setting a PIN after clearing is closed in v1.3.6+.
     }
 
-    /**
-     * Gets the Guardian Recovery Key.
-     * If a PIN exists from an older version without a Guardian Key,
-     * one is automatically generated and saved.
-     */
     fun getGuardianKey(context: Context): String {
-        val prefs = getPrefs(context)
-        var key = prefs.getString(KEY_GUARDIAN_KEY, null)
-        if (key.isNullOrBlank()) {
-            val defaultPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            key = defaultPrefs.getString(KEY_GUARDIAN_KEY, null)
-        }
-        if (key.isNullOrBlank()) {
-            // Auto-generate if PIN exists
-            val newKey = generateGuardianKey()
-            try {
-                getPrefs(context).edit().putString(KEY_GUARDIAN_KEY, newKey).apply()
-                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString(KEY_GUARDIAN_KEY, newKey).apply()
-            } catch (e: Exception) {}
-            return newKey
-        }
-        return key
+        return ""
     }
 
-    /**
-     * Remaining minutes until lockout expires (0 if not locked out).
-     */
     fun getResetLockoutRemainingMinutes(context: Context): Long {
-        val lockoutUntil = getPrefs(context).getLong(KEY_RESET_LOCKOUT_UNTIL, 0L)
-        val now = System.currentTimeMillis()
-        if (now < lockoutUntil) {
-            val remSeconds = (lockoutUntil - now) / 1000
-            return (remSeconds / 60) + 1
-        }
         return 0L
     }
 
     fun getFailedAttemptsRemaining(context: Context): Int {
-        val failed = getPrefs(context).getInt(KEY_FAILED_RESET_ATTEMPTS, 0)
-        return (MAX_RESET_ATTEMPTS - failed).coerceAtLeast(0)
+        return 0
     }
 
     /**
-     * Resets the PIN using the Guardian Recovery Key.
-     * The user CANNOT do this alone without their accountability partner / guardian's key!
-     * Includes brute-force protection: 5 wrong attempts lock out reset for 30 minutes.
-     * Upon success, generates a BRAND NEW Guardian Key and invalidates the previous one.
+     * Disabled: in-app Guardian Key reset is permanently closed so the user can never reset the PIN alone.
      */
     fun resetPinWithGuardianKey(context: Context, guardianKeyInput: String, newPin: String): ResetResult {
-        val prefs = getPrefs(context)
-        val now = System.currentTimeMillis()
-
-        // 1. Check lockout
-        val lockoutUntil = prefs.getLong(KEY_RESET_LOCKOUT_UNTIL, 0L)
-        if (now < lockoutUntil) {
-            val remMinutes = ((lockoutUntil - now) / (60 * 1000)) + 1
-            return ResetResult.LockedOut(remMinutes)
-        }
-
-        // 2. Check new PIN validity
-        val cleanNewPin = normalizeDigits(newPin)
-        if (cleanNewPin.length < 4) {
-            return ResetResult.InvalidNewPin
-        }
-
-        // 3. Verify Guardian Key
-        val savedKey = getGuardianKey(context)
-        val normInput = normalizeKey(guardianKeyInput)
-        val normSaved = normalizeKey(savedKey)
-
-        if (normInput.isEmpty() || normInput != normSaved) {
-            val failed = prefs.getInt(KEY_FAILED_RESET_ATTEMPTS, 0) + 1
-            if (failed >= MAX_RESET_ATTEMPTS) {
-                // Lockout for 30 minutes!
-                val lockTime = now + LOCKOUT_DURATION_MS
-                prefs.edit()
-                    .putInt(KEY_FAILED_RESET_ATTEMPTS, 0)
-                    .putLong(KEY_RESET_LOCKOUT_UNTIL, lockTime)
-                    .apply()
-                try {
-                    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-                        .putInt(KEY_FAILED_RESET_ATTEMPTS, 0)
-                        .putLong(KEY_RESET_LOCKOUT_UNTIL, lockTime)
-                        .apply()
-                } catch (e: Exception) {}
-                return ResetResult.LockedOut(30)
-            } else {
-                prefs.edit().putInt(KEY_FAILED_RESET_ATTEMPTS, failed).apply()
-                try {
-                    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-                        .putInt(KEY_FAILED_RESET_ATTEMPTS, failed)
-                        .apply()
-                } catch (e: Exception) {}
-                return ResetResult.InvalidKey(MAX_RESET_ATTEMPTS - failed)
-            }
-        }
-
-        // 4. Success: Save new PIN, generate BRAND NEW Guardian Key
-        val newGuardianKey = generateGuardianKey()
-        try {
-            val defaultPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            defaultPrefs.edit()
-                .putString(KEY_PIN, cleanNewPin)
-                .putString(KEY_GUARDIAN_KEY, newGuardianKey)
-                .putBoolean(KEY_PIN_PERMANENTLY_LOCKED, true)
-                .putInt(KEY_FAILED_RESET_ATTEMPTS, 0)
-                .putLong(KEY_RESET_LOCKOUT_UNTIL, 0L)
-                .apply()
-        } catch (e: Exception) {}
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            try {
-                val protectedPrefs = context.createDeviceProtectedStorageContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                protectedPrefs.edit()
-                    .putString(KEY_PIN, cleanNewPin)
-                    .putString(KEY_GUARDIAN_KEY, newGuardianKey)
-                    .putBoolean(KEY_PIN_PERMANENTLY_LOCKED, true)
-                    .putInt(KEY_FAILED_RESET_ATTEMPTS, 0)
-                    .putLong(KEY_RESET_LOCKOUT_UNTIL, 0L)
-                    .apply()
-            } catch (e: Exception) {}
-        }
-
-        // Grant temporary 60-second unlock so user can access immediately
-        unlockForSeconds(context, 60)
-
-        return ResetResult.Success(newGuardianKey)
+        return ResetResult.InvalidKey(0)
     }
 
-    /**
-     * Share Guardian Recovery Key via WhatsApp, SMS, or other apps.
-     */
     fun shareGuardianKey(context: Context, guardianKey: String) {
-        val isBn = LanguageStore.currentLanguage.value == "bn"
-        val shareText = if (isBn) {
-            "🛡️ Purity Tracker - গার্ডিয়ান রিকভারি কি (Guardian Key)\n\n" +
-            "আমার পিউরিটি ট্র্যাকার অ্যাপের সিকিউরিটি পিন সুরক্ষিত রাখতে এই গার্ডিয়ান কোডটি আপনার কাছে সংরক্ষণ করে রাখুন:\n\n" +
-            "🔑 সিকিউরিটি কোড: $guardianKey\n\n" +
-            "⚠️ আমি যদি কখনো পিন ভুলে যাই, শুধুমাত্র আপনার অনুমতি এবং আপনার কাছে থাকা এই কোডটি দিয়েই পিন রিসেট করা যাবে। আমি নিজে একা এই কোড ছাড়া পিন রিসেট করতে পারব না। আমাকে সুস্থ ও পবিত্র পথে সাহায্য করার জন্য ধন্যবাদ!"
-        } else {
-            "🛡️ Purity Tracker - Guardian Recovery Key\n\n" +
-            "Please keep this Guardian Recovery Key safe for my Purity Tracker app security PIN:\n\n" +
-            "🔑 Security Key: $guardianKey\n\n" +
-            "⚠️ If I ever forget my PIN, it can ONLY be reset using this key from you. I cannot reset it alone. Thank you for being my accountability partner!"
-        }
-
-        try {
-            val sendIntent = Intent().apply {
-                action = Intent.ACTION_SEND
-                putExtra(Intent.EXTRA_TEXT, shareText)
-                type = "text/plain"
-                if (context !is Activity) {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-            }
-            val shareIntent = Intent.createChooser(sendIntent, if (isBn) "গার্ডিয়ান কি শেয়ার করুন" else "Share Guardian Key").apply {
-                if (context !is Activity) {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-            }
-            context.startActivity(shareIntent)
-        } catch (e: Exception) {}
+        // No-op in v1.3.6+
     }
 
     fun verifyPin(context: Context, input: String): Boolean {
-        val saved = getPin(context) ?: return false
         val cleanInput = normalizeDigits(input)
-        return saved == cleanInput
+        if (cleanInput.length !in 4..6 || !cleanInput.all { it.isDigit() }) {
+            return false
+        }
+
+        val savedHash = getPinHash(context)
+        val savedSalt = getPinSalt(context)
+        if (!savedHash.isNullOrBlank() && !savedSalt.isNullOrBlank()) {
+            val candidateHash = computeSaltedPinHash(cleanInput, savedSalt)
+            return candidateHash.equals(savedHash, ignoreCase = true)
+        }
+
+        val legacyPin = getLegacyPlainPin(context)
+        if (!legacyPin.isNullOrBlank()) {
+            return legacyPin == cleanInput
+        }
+        return false
     }
 
     @Volatile
