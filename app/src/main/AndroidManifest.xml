@@ -64,6 +64,7 @@
         <activity android:name=".PinLockActivity"
             android:theme="@style/Theme.MyApplication"
             android:exported="false"
+            android:taskAffinity=""
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:launchMode="singleTask"

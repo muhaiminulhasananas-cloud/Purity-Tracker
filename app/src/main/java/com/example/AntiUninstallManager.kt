@@ -263,9 +263,6 @@ object AntiUninstallManager {
      */
     fun openOemAutoStartSettings(context: Context) {
         markOemAutoStartVisited(context)
-        // Grant a short setup grace window so if the fallback opens App Info or OEM Power Control,
-        // the user can enable Auto-Launch / Background Activity without being auto-backed immediately
-        ProtectionService.grantInitialDnsSetupGraceWindow()
 
         val candidateIntents = listOf(
             // 1. ColorOS / OPPO
@@ -360,20 +357,16 @@ object AntiUninstallManager {
             } catch (e: Exception) {}
         }
 
-        // 6. Fallback to generic App Info screen
-        try {
-            val appInfoIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                data = Uri.fromParts("package", context.packageName, null)
-                if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(appInfoIntent)
-        } catch (e: Exception) {
-            try {
-                val settingsIntent = Intent(Settings.ACTION_SETTINGS).apply {
-                    if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(settingsIntent)
-            } catch (e2: Exception) {}
+        // 6. On stock Android / Pixel without a vendor Auto-Start manager, do NOT open App Info
+        // (which would expose the Uninstall button); instead open Battery Optimization settings or confirm Auto-start.
+        if (!isBatteryOptimizationIgnored(context)) {
+            requestIgnoreBatteryOptimization(context)
+        } else {
+            Toast.makeText(
+                context,
+                "Auto-start is active on this device.",
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
 

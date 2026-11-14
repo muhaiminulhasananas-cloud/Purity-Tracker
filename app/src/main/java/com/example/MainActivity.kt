@@ -9891,6 +9891,7 @@ fun HomeScreen(
         var isSendingHomePartnerChange by remember { mutableStateOf(false) }
         var showHomeSetPartnerDialog by remember { mutableStateOf(false) }
         var homePartnerEmailInput by remember { mutableStateOf("") }
+        var isSendingHomePinRequest by remember { mutableStateOf(false) }
 
         // Persistent continuous UI-thread guard loop (v1.3.6: partner-only PIN)
         LaunchedEffect(Unit) {
@@ -10417,7 +10418,7 @@ fun HomeScreen(
                                     !hasPin -> {
                                         android.widget.Toast.makeText(
                                             context,
-                                            "Request your partner to set your Security PIN first",
+                                            "Tap App PIN below so your partner can set your PIN first",
                                             android.widget.Toast.LENGTH_LONG
                                         ).show()
                                     }
@@ -10432,6 +10433,14 @@ fun HomeScreen(
                                     else -> {
                                         BlockerManager.enableAdultBlocker(context)
                                         isBlockerActive = true
+                                        if (!AntiUninstallManager.isDeviceAdminActive(context)) {
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                "Activate Device Admin to complete uninstall protection",
+                                                android.widget.Toast.LENGTH_LONG
+                                            ).show()
+                                            AntiUninstallManager.requestDeviceAdmin(context)
+                                        }
                                     }
                                 }
                             } else {
@@ -10445,6 +10454,109 @@ fun HomeScreen(
                             uncheckedTrackColor = Color(0xFF334155)
                         )
                     )
+                }
+
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                // Row 4: App PIN (badge "Set by partner" green / "Not set yet" amber) — sends partner PIN email via EmailJS
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !isSendingHomePinRequest) {
+                            if (!isPartnerLockedHome) {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Save your Accountability Partner email first",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                                showHomeSetPartnerDialog = true
+                            } else {
+                                isSendingHomePinRequest = true
+                                BlockerManager.sendPinResetRequestToPartner(context) { ok, message ->
+                                    isSendingHomePinRequest = false
+                                    if (ok) {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "PIN request sent to your partner",
+                                            android.widget.Toast.LENGTH_LONG
+                                        ).show()
+                                    } else {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            message,
+                                            android.widget.Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                }
+                            }
+                        }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .background(
+                                    (if (hasPin) Color(0xFF10B981) else Color(0xFFF59E0B)).copy(alpha = 0.15f),
+                                    RoundedCornerShape(9.dp)
+                                )
+                                .border(
+                                    1.dp,
+                                    (if (hasPin) Color(0xFF10B981) else Color(0xFFF59E0B)).copy(alpha = 0.4f),
+                                    RoundedCornerShape(9.dp)
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Key,
+                                contentDescription = null,
+                                tint = if (hasPin) Color(0xFF34D399) else Color(0xFFFBBF24),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "App PIN",
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = titleColor
+                            )
+                            Text(
+                                text = when {
+                                    isSendingHomePinRequest -> "Sending request to partner..."
+                                    hasPin -> "Tap to request PIN reset"
+                                    else -> "Tap to request partner PIN"
+                                },
+                                fontSize = 11.sp,
+                                color = subtextColor,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    val pinChipColor = if (hasPin) Color(0xFF10B981) else Color(0xFFF59E0B)
+                    Box(
+                        modifier = Modifier
+                            .background(pinChipColor.copy(alpha = 0.16f), RoundedCornerShape(8.dp))
+                            .border(1.dp, pinChipColor.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = if (hasPin) "Set by partner" else "Not set yet",
+                            color = if (hasPin) Color(0xFF34D399) else Color(0xFFFBBF24),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
 
                 HorizontalDivider(color = Color.White.copy(alpha = 0.08f))

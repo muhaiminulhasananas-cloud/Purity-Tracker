@@ -142,6 +142,14 @@ fun BlockerScreen(
             BlockerManager.enableAdultBlocker(context)
             isBlockerEnabled = true
             topStatusBanner = "Block adult content is now ON."
+            if (!isDeviceAdminActive) {
+                Toast.makeText(
+                    context,
+                    "Activate Device Admin to complete uninstall protection",
+                    Toast.LENGTH_LONG
+                ).show()
+                AntiUninstallManager.requestDeviceAdmin(context)
+            }
         }
     }
 
@@ -210,6 +218,14 @@ fun BlockerScreen(
                     BlockerManager.enableAdultBlocker(context)
                     isBlockerEnabled = true
                     topStatusBanner = "Block adult content is now ON."
+                    if (!isDeviceAdminActive) {
+                        Toast.makeText(
+                            context,
+                            "Activate Device Admin to complete uninstall protection",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        AntiUninstallManager.requestDeviceAdmin(context)
+                    }
                 }
             }
         }
@@ -311,6 +327,47 @@ fun BlockerScreen(
                                 modifier = Modifier.size(14.dp)
                             )
                         }
+                    }
+                }
+            }
+        }
+
+        // Clear warning on the Blocker page when Device Admin is OFF
+        if (!isDeviceAdminActive) {
+            Surface(
+                color = Color(0xFFEF4444).copy(alpha = 0.14f),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.5f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("device_admin_incomplete_warning")
+                    .clickable {
+                        AntiUninstallManager.requestDeviceAdmin(context)
+                    }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = Color(0xFFF87171),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Uninstall protection is incomplete — Device Admin is OFF. Tap to activate.",
+                            color = Color(0xFFFCA5A5),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            lineHeight = 16.sp
+                        )
                     }
                 }
             }
@@ -500,7 +557,7 @@ fun BlockerScreen(
                                     }
                             )
                             CompactStatusChip(
-                                text = if (hasPin) "PIN Set" else "Partner PIN",
+                                text = if (hasPin) "Set by partner" else "Not set yet",
                                 isPositive = hasPin,
                                 modifier = if (!hasPin) {
                                     Modifier.clickable(enabled = !isSendingPinResetRequest) { triggerPartnerPinReset() }
@@ -556,21 +613,18 @@ fun BlockerScreen(
                                         return@Switch
                                     }
 
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
-                                        try {
-                                            val overlayIntent = Intent(
-                                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                                Uri.parse("package:${context.packageName}")
-                                            ).apply {
-                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                            }
-                                            context.startActivity(overlayIntent)
-                                        } catch (e: Exception) {}
-                                    }
-
                                     BlockerManager.enableAdultBlocker(context)
                                     isBlockerEnabled = true
                                     topStatusBanner = "Block adult content is now ON."
+
+                                    if (!isDeviceAdminActive) {
+                                        Toast.makeText(
+                                            context,
+                                            "Activate Device Admin to complete uninstall protection",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                        AntiUninstallManager.requestDeviceAdmin(context)
+                                    }
                                 } else {
                                     showTurnOffDialog = true
                                 }
@@ -632,9 +686,9 @@ fun BlockerScreen(
                     icon = Icons.Outlined.VerifiedUser,
                     iconTint = Color(0xFF818CF8),
                     title = "Device Admin",
-                    subtitle = if (isDeviceAdminActive) "Blocks app uninstall" else "Tap to activate",
+                    subtitle = if (isDeviceAdminActive) "Blocks app uninstall" else "Uninstall protection incomplete",
                     titleColor = titleColor,
-                    subtitleColor = descColor,
+                    subtitleColor = if (isDeviceAdminActive) descColor else Color(0xFFF87171),
                     modifier = Modifier
                         .testTag("activate_device_admin_button")
                         .clickable {

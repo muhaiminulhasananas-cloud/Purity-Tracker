@@ -229,11 +229,10 @@ object LockManager {
 
     /**
      * Marks that the guard is launching PinLockActivity right now so the guard
-     * immediately pauses auto-back and never backs out of its own PIN screen.
+     * immediately pauses auto-back during the launch transition and never backs out of its own PIN screen.
      */
     fun markPinScreenLaunching() {
-        pinScreenVisible = true
-        pinScreenLaunchGraceUntilElapsed = android.os.SystemClock.elapsedRealtime() + 2500L
+        pinScreenLaunchGraceUntilElapsed = android.os.SystemClock.elapsedRealtime() + 1800L
     }
 
     /**
@@ -253,7 +252,7 @@ object LockManager {
     fun isPinScreenCurrentlyActive(): Boolean {
         if (pinScreenVisible) return true
         val now = android.os.SystemClock.elapsedRealtime()
-        return pinScreenLaunchGraceUntilElapsed > now && (pinScreenLaunchGraceUntilElapsed - now) <= 3000L
+        return pinScreenLaunchGraceUntilElapsed > now && (pinScreenLaunchGraceUntilElapsed - now) <= 2000L
     }
 
     fun unlockForMinutes(context: Context, minutes: Int) {

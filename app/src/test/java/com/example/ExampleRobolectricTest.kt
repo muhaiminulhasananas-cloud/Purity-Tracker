@@ -187,4 +187,87 @@ class ExampleRobolectricTest {
     assertEquals(true, LockManager.isCurrentlyUnlocked(context))
     assertEquals(false, LockManager.isPinScreenCurrentlyActive())
   }
+
+  @Test
+  fun `guard detects Purity Tracker App info and Uninstall popups across all Android brands while ignoring all other apps`() {
+    // 1. Screenshot 1: Launcher "Delete Purity Tracker" uninstall confirmation popup
+    val screenshot1Popup = """
+      Delete Purity Tracker
+      After uninstallation, all app data will be cleared.
+      Cancel Uninstall
+    """.trimIndent()
+    assertEquals(true, ProtectionService.isOurUninstallPopupText(screenshot1Popup, "com.android.launcher"))
+
+    // Quoted / Samsung / Pixel / Xiaomi / Vivo variants of Purity Tracker uninstall popup
+    assertEquals(
+      true,
+      ProtectionService.isOurUninstallPopupText(
+        "Delete \"Purity Tracker\"? Deleting this app will also delete its data. Cancel Delete",
+        "com.oppo.launcher"
+      )
+    )
+    assertEquals(
+      true,
+      ProtectionService.isOurUninstallPopupText(
+        "Purity Tracker Do you want to uninstall this app? Cancel OK",
+        "com.google.android.packageinstaller"
+      )
+    )
+
+    // Must NEVER trigger on another app's uninstall popup
+    val otherAppUninstall = """
+      Delete WhatsApp
+      After uninstallation, all app data will be cleared.
+      Cancel Uninstall
+    """.trimIndent()
+    assertEquals(false, ProtectionService.isOurUninstallPopupText(otherAppUninstall, "com.android.launcher"))
+    assertEquals(
+      false,
+      ProtectionService.isOurUninstallPopupText(
+        "Chrome Do you want to uninstall this app? Cancel OK",
+        "com.google.android.packageinstaller"
+      )
+    )
+
+    // 2. Screenshot 2: System App info screen for Purity Tracker
+    val screenshot2AppInfo = """
+      App info
+      Purity Tracker
+      Version 1.3.6
+      Open Force stop Uninstall
+      Storage usage 42.33 MB
+      Data usage details
+      Battery usage
+      Manage notifications
+      Permissions
+      Display over other apps
+      Front camera display
+    """.trimIndent()
+    assertEquals(true, ProtectionService.isOurAppInfoOrTamperText(screenshot2AppInfo))
+
+    // Must NEVER trigger on another app's App info screen
+    val otherAppInfo = """
+      App info
+      WhatsApp
+      Version 2.24.18
+      Open Force stop Uninstall
+      Storage usage 140 MB
+      Data usage details
+      Battery usage
+      Manage notifications
+      Permissions
+    """.trimIndent()
+    assertEquals(false, ProtectionService.isOurAppInfoOrTamperText(otherAppInfo))
+
+    // Must NEVER trigger on the multi-app "App management / All apps" list
+    val multiAppList = """
+      App management
+      Search apps
+      All apps
+      Purity Tracker 42.33 MB
+      WhatsApp 140 MB
+      Chrome 210 MB
+    """.trimIndent()
+    assertEquals(false, ProtectionService.isOurAppInfoOrTamperText(multiAppList))
+  }
 }

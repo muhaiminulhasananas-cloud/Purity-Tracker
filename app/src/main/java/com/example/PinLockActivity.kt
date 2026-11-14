@@ -48,10 +48,13 @@ class PinLockActivity : ComponentActivity() {
             val cardBg = Color(0xFF1E293B)
             val cyanAccent = Color(0xFF00FFCC)
 
+            var hasPartnerPin by remember { mutableStateOf(LockManager.hasPin(this@PinLockActivity)) }
+
             LaunchedEffect(Unit) {
                 BlockerManager.ensurePinResetApprovalListener(this@PinLockActivity) { status ->
                     if (status == "approved") {
                         BlockerManager.consumePartnerPinResetNotice(this@PinLockActivity)
+                        hasPartnerPin = LockManager.hasPin(this@PinLockActivity)
                         statusMessage = "Your PIN was reset by your partner"
                     }
                 }
@@ -107,10 +110,13 @@ class PinLockActivity : ComponentActivity() {
                             Spacer(modifier = Modifier.height(8.dp))
 
                             Text(
-                                text = if (isBn)
-                                    "সেটিংস বা প্রটেকশন আনলক করতে আপনার পার্টনারের সেট করা পিন কোডটি প্রবেশ করান।"
-                                else
-                                    "Enter the security PIN set by your accountability partner to unlock settings for 60 seconds.",
+                                text = if (!hasPartnerPin) {
+                                    "No partner PIN is set yet. Tap 'Forgot PIN?' below to ask your accountability partner to set your PIN."
+                                } else if (isBn) {
+                                    "সেটিংস বা আনইনস্টল আনলক করতে আপনার পার্টনারের সেট করা পিন কোডটি প্রবেশ করান।"
+                                } else {
+                                    "Enter the security PIN set by your accountability partner to pause the guard for 60 seconds."
+                                },
                                 style = MaterialTheme.typography.bodyMedium.copy(
                                     color = Color(0xFF94A3B8),
                                     fontSize = 13.sp,
@@ -161,7 +167,8 @@ class PinLockActivity : ComponentActivity() {
                                     text = customErrorMessage ?: if (isBn) "ভুল পিন কোড! সঠিক পিন লিখুন।" else "Incorrect PIN! Please try again.",
                                     color = Color(0xFFEF4444),
                                     fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium
+                                    fontWeight = FontWeight.Medium,
+                                    textAlign = TextAlign.Center
                                 )
                             }
 
@@ -180,12 +187,17 @@ class PinLockActivity : ComponentActivity() {
 
                             Button(
                                 onClick = {
-                                    if (LockManager.verifyPin(this@PinLockActivity, pinInput)) {
+                                    hasPartnerPin = LockManager.hasPin(this@PinLockActivity)
+                                    if (!hasPartnerPin) {
+                                        isError = true
+                                        customErrorMessage = "No PIN set yet — tap 'Forgot PIN?' so your partner can set it."
+                                        pinInput = ""
+                                    } else if (LockManager.verifyPin(this@PinLockActivity, pinInput)) {
                                         LockManager.unlockForSeconds(this@PinLockActivity, 60)
                                         LockManager.markPinScreenActive(false)
                                         Toast.makeText(
                                             this@PinLockActivity,
-                                            if (isBn) "সঠিক পিন! ১ মিনিটের জন্য আনলক করা হয়েছে" else "Correct PIN! Unlocked for 1 minute",
+                                            "Guard paused for 60 seconds — you can now uninstall",
                                             Toast.LENGTH_LONG
                                         ).show()
                                         finish()
@@ -227,7 +239,12 @@ class PinLockActivity : ComponentActivity() {
                                         BlockerManager.sendPinResetRequestToPartner(this@PinLockActivity) { ok, msg ->
                                             isSendingPartnerReset = false
                                             if (ok) {
-                                                statusMessage = msg
+                                                statusMessage = "PIN request sent to your partner"
+                                                Toast.makeText(
+                                                    this@PinLockActivity,
+                                                    "PIN request sent to your partner",
+                                                    Toast.LENGTH_LONG
+                                                ).show()
                                             } else {
                                                 Toast.makeText(this@PinLockActivity, msg, Toast.LENGTH_LONG).show()
                                             }
@@ -274,13 +291,17 @@ class PinLockActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        ProtectionService.dismissAccessibilityPinOverlayIfPresent()
         LockManager.markPinScreenActive(true)
     }
 
+    override fun onStop() {
+        LockManager.markPinScreenActive(false)
+        super.onStop()
+    }
+
     override fun onDestroy() {
-        if (isFinishing) {
-            LockManager.markPinScreenActive(false)
-        }
+        LockManager.markPinScreenActive(false)
         super.onDestroy()
     }
 
