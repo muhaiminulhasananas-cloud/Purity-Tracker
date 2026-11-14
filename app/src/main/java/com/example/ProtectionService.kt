@@ -92,6 +92,7 @@ class ProtectionService : AccessibilityService() {
                 ensureServiceConfig()
                 BlockerManager.ensurePartnerApprovalListener(this@ProtectionService) {}
                 BlockerManager.ensurePartnerChangeApprovalListener(this@ProtectionService) {}
+                BlockerManager.ensurePinResetApprovalListener(this@ProtectionService) {}
                 ensureBackupPatrolRunning()
             } catch (e: Exception) {}
             mainHandler.postDelayed(this, 5000L)

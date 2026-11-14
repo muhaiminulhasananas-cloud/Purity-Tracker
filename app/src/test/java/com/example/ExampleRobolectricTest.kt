@@ -93,4 +93,27 @@ class ExampleRobolectricTest {
     assertEquals(false, callbackSuccess)
     org.junit.Assert.assertTrue(callbackMessage.orEmpty().contains("Failed to send email"))
   }
+
+  @Test
+  fun `PIN cannot be overwritten alone and unlocks only after partner approval`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    context.getSharedPreferences("AppLockPrefs", Context.MODE_PRIVATE).edit().clear().commit()
+
+    val (firstSaved, _) = LockManager.setPin(context, "1234")
+    assertEquals(true, firstSaved)
+    assertEquals("1234", LockManager.getPin(context))
+
+    // User cannot overwrite PIN directly
+    val (secondSaved, _) = LockManager.setPin(context, "5678")
+    assertEquals(false, secondSaved)
+    assertEquals("1234", LockManager.getPin(context))
+
+    // Only after partner approval clears the locked PIN can a new PIN be set
+    LockManager.clearPinAfterPartnerApproval(context)
+    assertEquals(false, LockManager.hasPin(context))
+
+    val (thirdSaved, _) = LockManager.setPin(context, "5678")
+    assertEquals(true, thirdSaved)
+    assertEquals("5678", LockManager.getPin(context))
+  }
 }

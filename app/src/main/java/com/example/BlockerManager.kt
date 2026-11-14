@@ -34,6 +34,8 @@ object BlockerManager {
     private const val KEY_PENDING_REQUEST_TIME = "pending_disable_request_time"
     private const val KEY_PENDING_PARTNER_CHANGE_ID = "pending_partner_change_request_id"
     private const val KEY_PENDING_PARTNER_CHANGE_TIME = "pending_partner_change_request_time"
+    private const val KEY_PENDING_PIN_RESET_ID = "pending_pin_reset_request_id"
+    private const val KEY_PENDING_PIN_RESET_TIME = "pending_pin_reset_request_time"
 
     /**
      * Single canonical approval web page URL (hosted on GitHub Pages `purity-approve` repository).
@@ -45,6 +47,9 @@ object BlockerManager {
 
     private var partnerChangeListener: ListenerRegistration? = null
     private var listenedPartnerChangeId: String? = null
+
+    private var pinResetListener: ListenerRegistration? = null
+    private var listenedPinResetId: String? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -627,6 +632,220 @@ object BlockerManager {
         } catch (e: Exception) {}
         approvalListener = null
         listenedRequestId = null
+    }
+
+    // =========================================================================
+    // 3B. PARTNER EMAIL APPROVAL FLOW FOR PIN RECOVERY ("Forgot PIN?")
+    // =========================================================================
+
+    fun getPendingPinResetRequestId(context: Context): String? {
+        val stdPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val dpPrefs = getDeviceProtectedContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return stdPrefs.getString(KEY_PENDING_PIN_RESET_ID, null)
+            ?: dpPrefs.getString(KEY_PENDING_PIN_RESET_ID, null)
+    }
+
+    private fun onPartnerApprovedPinReset(context: Context) {
+        LockManager.clearPinAfterPartnerApproval(context)
+
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_PENDING_PIN_RESET_ID)
+            .remove(KEY_PENDING_PIN_RESET_TIME)
+            .apply()
+
+        getDeviceProtectedContext(context)
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_PENDING_PIN_RESET_ID)
+            .remove(KEY_PENDING_PIN_RESET_TIME)
+            .apply()
+
+        stopListeningForPinResetApproval()
+    }
+
+    /**
+     * Sends a tokenized PIN reset authorization request to the Accountability Partner
+     * via Firestore `blocker_disable_requests/{requestId}` and `EmailJsSender.sendEmail`.
+     * Only when the partner clicks Approve does the app unlock setting a new PIN.
+     */
+    fun sendPinResetRequestToPartner(
+        context: Context,
+        onComplete: (Boolean, String) -> Unit
+    ) {
+        val partnerEmail = getPartnerEmail(context)
+        if (partnerEmail.isEmpty() || !hasValidPartnerEmail(context)) {
+            onComplete(false, "Save a valid accountability partner email first.")
+            return
+        }
+
+        val ownEmail = getCurrentUserEmail(context)
+        val guardianPrefs = context.getSharedPreferences(GUARDIAN_PREFS_NAME, Context.MODE_PRIVATE)
+        val userName = guardianPrefs.getString("userName", "")?.takeIf { it.isNotBlank() }
+            ?: ownEmail.substringBefore("@").ifEmpty { "Your friend" }
+
+        val userId = try {
+            FirebaseAuth.getInstance().currentUser?.uid ?: "user"
+        } catch (e: Exception) {
+            "user"
+        }
+
+        val requestId = UUID.randomUUID().toString()
+        val token = UUID.randomUUID().toString().replace("-", "")
+        val now = System.currentTimeMillis()
+
+        val db = try {
+            FirebaseFirestore.getInstance()
+        } catch (e: Exception) {
+            onComplete(false, "Network error: Could not connect to Firebase.")
+            return
+        }
+
+        val requestDoc = hashMapOf(
+            "requestId" to requestId,
+            "requestType" to "reset_pin",
+            "userId" to userId,
+            "userEmail" to ownEmail,
+            "userName" to userName,
+            "partnerEmail" to partnerEmail,
+            "status" to "pending",
+            "token" to token,
+            "createdAt" to now
+        )
+
+        db.collection("blocker_disable_requests")
+            .document(requestId)
+            .set(requestDoc)
+            .addOnSuccessListener {
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_PENDING_PIN_RESET_ID, requestId)
+                    .putLong(KEY_PENDING_PIN_RESET_TIME, now)
+                    .apply()
+
+                getDeviceProtectedContext(context)
+                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_PENDING_PIN_RESET_ID, requestId)
+                    .putLong(KEY_PENDING_PIN_RESET_TIME, now)
+                    .apply()
+
+                ensurePinResetApprovalListener(context) {}
+
+                val approveUrl = "$APPROVAL_PAGE_URL?req=$requestId&token=$token&type=reset_pin"
+
+                val emailSubject = "Action Required: $userName requested to reset their App Security PIN"
+                val emailText = """
+                    Hello,
+
+                    $userName (${ownEmail.ifEmpty { "Purity Tracker user" }}) forgot their App Security PIN in Purity Tracker and requested your authorization to reset it.
+
+                    They cannot reset their PIN alone without your approval.
+
+                    To APPROVE or DENY this PIN reset request, open this link:
+                    $approveUrl
+
+                    If you do NOT want to allow a PIN reset, ignore this email or click Deny.
+
+                    - Purity Tracker Accountability System
+                """.trimIndent()
+
+                val emailHtml = """
+                    <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 14px; background-color: #0f172a; color: #f8fafc;">
+                        <h2 style="color: #38bdf8; margin-top: 0;">🛡️ Purity Tracker — PIN Reset Request</h2>
+                        <p style="font-size: 15px; line-height: 1.6; color: #e2e8f0;">
+                            <strong>$userName</strong> (${ownEmail.ifEmpty { "Purity Tracker User" }}) forgot their <strong>App Security PIN</strong> and requested your authorization to set a new PIN.
+                        </p>
+                        <p style="font-size: 14px; line-height: 1.6; color: #cbd5e1;">
+                            They cannot reset their PIN alone. Only your click on the approval link below authorizes the reset.
+                        </p>
+                        <div style="margin: 28px 0; text-align: center;">
+                            <a href="$approveUrl" style="background-color: #10b981; color: #061018; font-weight: bold; text-decoration: none; padding: 14px 28px; border-radius: 10px; display: inline-block; font-size: 15px;">
+                                Approve PIN Reset
+                            </a>
+                        </div>
+                        <p style="font-size: 12px; color: #94a3b8; text-align: center;">
+                            Or open directly: <a href="$approveUrl" style="color: #38bdf8;">$approveUrl</a>
+                        </p>
+                        <hr style="border: none; border-top: 1px solid #1e293b; margin: 20px 0;" />
+                        <p style="font-size: 12px; color: #94a3b8; margin-bottom: 0;">
+                            If you deny this request or do not click approve, their current PIN remains locked.
+                        </p>
+                    </div>
+                """.trimIndent()
+
+                EmailJsSender.sendEmail(
+                    toEmail = partnerEmail,
+                    subject = emailSubject,
+                    messageText = emailText,
+                    messageHtml = emailHtml,
+                    onComplete = onComplete
+                )
+            }
+            .addOnFailureListener { e ->
+                mainHandler.post {
+                    onComplete(false, "Failed to send PIN reset request: ${e.localizedMessage ?: "Check internet connection"}")
+                }
+            }
+    }
+
+    fun ensurePinResetApprovalListener(
+        context: Context,
+        onStatusChanged: (String) -> Unit
+    ) {
+        val pendingId = getPendingPinResetRequestId(context)
+        if (pendingId.isNullOrBlank() || !LockManager.hasPin(context)) {
+            stopListeningForPinResetApproval()
+            return
+        }
+
+        if (listenedPinResetId == pendingId && pinResetListener != null) {
+            return
+        }
+
+        stopListeningForPinResetApproval()
+        listenedPinResetId = pendingId
+        val appContext = context.applicationContext
+
+        try {
+            val db = FirebaseFirestore.getInstance()
+            pinResetListener = db.collection("blocker_disable_requests")
+                .document(pendingId)
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
+                    val status = snapshot.getString("status")?.lowercase()?.trim().orEmpty()
+                    if (status == "approved") {
+                        onPartnerApprovedPinReset(appContext)
+                        mainHandler.post {
+                            onStatusChanged("approved")
+                        }
+                    } else if (status == "denied" || status == "rejected") {
+                        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit()
+                            .remove(KEY_PENDING_PIN_RESET_ID)
+                            .remove(KEY_PENDING_PIN_RESET_TIME)
+                            .apply()
+                        getDeviceProtectedContext(appContext)
+                            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit()
+                            .remove(KEY_PENDING_PIN_RESET_ID)
+                            .remove(KEY_PENDING_PIN_RESET_TIME)
+                            .apply()
+                        stopListeningForPinResetApproval()
+                        mainHandler.post {
+                            onStatusChanged("denied")
+                        }
+                    }
+                }
+        } catch (e: Exception) {}
+    }
+
+    fun stopListeningForPinResetApproval() {
+        try {
+            pinResetListener?.remove()
+        } catch (e: Exception) {}
+        pinResetListener = null
+        listenedPinResetId = null
     }
 
     // =========================================================================

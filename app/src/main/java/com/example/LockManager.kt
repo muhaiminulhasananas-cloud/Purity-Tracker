@@ -140,6 +140,36 @@ object LockManager {
     }
 
     /**
+     * Called ONLY when the Accountability Partner clicks the tokenized approval link
+     * for a `reset_pin` request (`status == "approved"` in Firestore).
+     * Never callable directly by the user alone.
+     */
+    fun clearPinAfterPartnerApproval(context: Context) {
+        try {
+            val defaultPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            defaultPrefs.edit()
+                .remove(KEY_PIN)
+                .putBoolean(KEY_PIN_PERMANENTLY_LOCKED, false)
+                .putInt(KEY_FAILED_RESET_ATTEMPTS, 0)
+                .putLong(KEY_RESET_LOCKOUT_UNTIL, 0L)
+                .apply()
+        } catch (e: Exception) {}
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                val protectedPrefs = context.createDeviceProtectedStorageContext()
+                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                protectedPrefs.edit()
+                    .remove(KEY_PIN)
+                    .putBoolean(KEY_PIN_PERMANENTLY_LOCKED, false)
+                    .putInt(KEY_FAILED_RESET_ATTEMPTS, 0)
+                    .putLong(KEY_RESET_LOCKOUT_UNTIL, 0L)
+                    .apply()
+            } catch (e: Exception) {}
+        }
+    }
+
+    /**
      * Gets the Guardian Recovery Key.
      * If a PIN exists from an older version without a Guardian Key,
      * one is automatically generated and saved.
