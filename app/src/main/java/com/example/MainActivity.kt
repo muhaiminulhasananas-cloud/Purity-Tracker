@@ -3840,52 +3840,26 @@ fun IslamicAiChat(aiViewModel: AiViewModel = viewModel(), onNavigateToPremium: (
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     
     val context = LocalContext.current
-    var tts by remember { mutableStateOf<android.speech.tts.TextToSpeech?>(null) }
-    var speakingMessageId by remember { mutableStateOf<String?>(null) }
+    val speakingMessageId by aiViewModel.speakingMessageId.collectAsState()
+    val loadingAudioMessageId by aiViewModel.loadingAudioMessageId.collectAsState()
+    val ttsError by aiViewModel.ttsError.collectAsState()
+
+    LaunchedEffect(ttsError) {
+        val err = ttsError
+        if (!err.isNullOrBlank()) {
+            android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_LONG).show()
+            aiViewModel.clearTtsError()
+        }
+    }
 
     DisposableEffect(Unit) {
-        val ttsInstance = android.speech.tts.TextToSpeech(context) { status ->
-            if (status == android.speech.tts.TextToSpeech.SUCCESS) {
-                // Set language to Bengali BD, if missing/not supported fall back to default locale
-                val result = tts?.setLanguage(java.util.Locale("bn", "BD"))
-                if (result == android.speech.tts.TextToSpeech.LANG_NOT_SUPPORTED || result == android.speech.tts.TextToSpeech.LANG_MISSING_DATA) {
-                    tts?.setLanguage(java.util.Locale.getDefault())
-                }
-            }
-        }
-        
-        ttsInstance.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
-            override fun onDone(utteranceId: String?) {
-                if (speakingMessageId == utteranceId) {
-                    speakingMessageId = null
-                }
-            }
-            @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) {
-                if (speakingMessageId == utteranceId) {
-                    speakingMessageId = null
-                }
-            }
-        })
-
-        tts = ttsInstance
-
         onDispose {
-            ttsInstance.stop()
-            ttsInstance.shutdown()
+            aiViewModel.stopSpeaking()
         }
     }
 
     val speakMessage: (String, String) -> Unit = { id, text ->
-        tts?.let {
-            it.stop()
-            speakingMessageId = id
-            val params = Bundle().apply {
-                putString(android.speech.tts.TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, id)
-            }
-            it.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, params, id)
-        }
+        aiViewModel.speakMessage(id, text)
     }
 
     LaunchedEffect(messages.size) {
@@ -4022,25 +3996,34 @@ fun IslamicAiChat(aiViewModel: AiViewModel = viewModel(), onNavigateToPremium: (
                                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                                             modifier = Modifier.fillMaxWidth()
                                         ) {
-                                            // 1. Text to Speech Play/Stop button
+                                            // 1. Gemini Pegasus Voice Play/Stop button
                                             val isCurrentlySpeaking = speakingMessageId == msg.id
+                                            val isLoadingAudio = loadingAudioMessageId == msg.id
                                             IconButton(
                                                 onClick = {
-                                                    if (isCurrentlySpeaking) {
-                                                        tts?.stop()
-                                                        speakingMessageId = null
-                                                    } else {
+                                                    if (isCurrentlySpeaking || isLoadingAudio) {
+                                                        aiViewModel.stopSpeaking()
+                                                    } else if (!msg.isStreaming) {
                                                         speakMessage(msg.id, msgText)
                                                     }
                                                 },
+                                                enabled = !msg.isStreaming,
                                                 modifier = Modifier.size(30.dp)
                                             ) {
-                                                Icon(
-                                                    imageVector = if (isCurrentlySpeaking) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
-                                                    contentDescription = t("listen"),
-                                                    tint = if (isCurrentlySpeaking) Color(0xFF229ED9) else if (isLightMode) Color(0xFF64748B) else Color(0xFF94A3B8),
-                                                    modifier = Modifier.size(18.dp)
-                                                )
+                                                if (isLoadingAudio) {
+                                                    CircularProgressIndicator(
+                                                        modifier = Modifier.size(16.dp),
+                                                        strokeWidth = 2.dp,
+                                                        color = Color(0xFF229ED9)
+                                                    )
+                                                } else {
+                                                    Icon(
+                                                        imageVector = if (isCurrentlySpeaking) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                                                        contentDescription = t("listen"),
+                                                        tint = if (isCurrentlySpeaking) Color(0xFF229ED9) else if (isLightMode) Color(0xFF64748B) else Color(0xFF94A3B8),
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
                                             }
 
                                             // 2. Clipboard copy button

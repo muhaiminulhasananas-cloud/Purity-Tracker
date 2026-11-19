@@ -355,4 +355,84 @@ class ExampleRobolectricTest {
       )
     )
   }
+
+  @Test
+  fun `NoorVoicePlayer builds Pegasus TTS request, strips markdown, and parses PCM audio params`() {
+    val reqJson = NoorVoicePlayer.buildTtsRequestJson("**Assalamu Alaikum!**\n- Keep praying *Fajr* daily.")
+    assertEquals(true, reqJson.contains("\"responseModalities\":[\"AUDIO\"]"))
+    assertEquals(true, reqJson.contains("\"voiceName\":\"Pegasus\""))
+    assertEquals(false, reqJson.contains("**"))
+    assertEquals(true, reqJson.contains("Assalamu Alaikum!"))
+
+    val (rate1, ch1) = NoorVoicePlayer.parseAudioMimeParams("audio/l16; rate=24000; channels=1")
+    assertEquals(24000, rate1)
+    assertEquals(1, ch1)
+
+    val (rate2, ch2) = NoorVoicePlayer.parseAudioMimeParams("audio/L16;codec=pcm;rate=16000")
+    assertEquals(16000, rate2)
+    assertEquals(1, ch2)
+  }
+
+  @Test
+  fun `GeminiErrorFormatter reports API key, quota, server, timeout, and network errors accurately without leaking key`() {
+    val secretKey = "AQ.FAKE_TEST_KEY_12345"
+
+    val invalidKeyMsg = GeminiErrorFormatter.format(
+      GeminiApiException(400, "INVALID_ARGUMENT", "API key not valid. Key $secretKey failed."),
+      secretKey
+    )
+    assertEquals(true, invalidKeyMsg.contains("API key", ignoreCase = true))
+    assertEquals(false, invalidKeyMsg.contains(secretKey))
+    assertEquals(false, invalidKeyMsg.contains("internet connection", ignoreCase = true))
+
+    val revokedKeyMsg = GeminiErrorFormatter.format(
+      GeminiApiException(403, "PERMISSION_DENIED", "API key was revoked"),
+      secretKey
+    )
+    assertEquals(true, revokedKeyMsg.contains("rejected or revoked", ignoreCase = true))
+
+    val quotaMsg = GeminiErrorFormatter.format(
+      GeminiApiException(429, "RESOURCE_EXHAUSTED", "Quota exceeded for quota metric"),
+      secretKey
+    )
+    assertEquals(true, quotaMsg.contains("quota", ignoreCase = true))
+    assertEquals(false, quotaMsg.contains("internet connection", ignoreCase = true))
+
+    val busyMsg = GeminiErrorFormatter.format(
+      GeminiApiException(503, "UNAVAILABLE", "High demand"),
+      secretKey
+    )
+    assertEquals(true, busyMsg.contains("temporarily busy", ignoreCase = true))
+
+    val timeoutMsg = GeminiErrorFormatter.format(
+      java.net.SocketTimeoutException("Read timed out"),
+      secretKey
+    )
+    assertEquals(true, timeoutMsg.contains("timed out", ignoreCase = true))
+
+    val offlineMsg = GeminiErrorFormatter.format(
+      java.net.UnknownHostException("Unable to resolve host"),
+      secretKey
+    )
+    assertEquals(true, offlineMsg.contains("internet connection", ignoreCase = true))
+  }
+
+  @Test
+  fun `GeminiStreamParser extracts visible text and skips thought parts`() {
+    val chunkWithThought = """
+      {
+        "candidates": [{
+          "content": {
+            "role": "model",
+            "parts": [
+              {"thought": true, "text": "internal reasoning"},
+              {"text": "Wa Alaikum Assalam! "}
+            ]
+          }
+        }]
+      }
+    """.trimIndent()
+    assertEquals("Wa Alaikum Assalam! ", GeminiStreamParser.extractVisibleTextFromChunkJson(chunkWithThought))
+    assertEquals("", GeminiStreamParser.extractVisibleTextFromChunkJson("[DONE]"))
+  }
 }
