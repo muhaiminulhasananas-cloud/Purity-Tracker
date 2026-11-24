@@ -275,43 +275,54 @@ fun PrayerSceneryCard(
         }
     }
 
-    // Live clock trigger (updates every 1 second)
-    var currentTimeMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    // Minute-level clock trigger (only recomposes the full scenery card when the minute changes, not every second)
+    var currentTotalMinutes by remember {
+        val cal = Calendar.getInstance()
+        mutableIntStateOf(cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE))
+    }
     LaunchedEffect(Unit) {
         while (true) {
-            currentTimeMillis = System.currentTimeMillis()
-            delay(1000L)
+            val cal = Calendar.getInstance()
+            val nowMins = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+            if (nowMins != currentTotalMinutes) {
+                currentTotalMinutes = nowMins
+            }
+            val msIntoMinute = cal.get(Calendar.SECOND) * 1000L + cal.get(Calendar.MILLISECOND)
+            delay((60_000L - msIntoMinute).coerceIn(500L, 60_000L))
         }
     }
 
-    // Parse prayer times or fallback to standard timings
-    val calendar = remember(currentTimeMillis) { Calendar.getInstance().apply { timeInMillis = currentTimeMillis } }
-    val currentHour = calendar.get(Calendar.HOUR_OF_DAY)
-    val currentMinute = calendar.get(Calendar.MINUTE)
-    val currentSecond = calendar.get(Calendar.SECOND)
-    val currentTotalMinutes = currentHour * 60 + currentMinute
-
-    // Determine current Waqt & Next Waqt
+    // Pre-parse prayer times only when timings change (zero per-second Date parsing)
     val sdf = remember { SimpleDateFormat("HH:mm", Locale.US) }
     val sdf12 = remember { SimpleDateFormat("hh:mm a", Locale.US) }
 
-    fun parseMinutes(timeStr: String?, defaultHour: Int, defaultMin: Int): Int {
-        if (timeStr == null) return defaultHour * 60 + defaultMin
-        return try {
-            val date = sdf.parse(timeStr) ?: return defaultHour * 60 + defaultMin
-            val cal = Calendar.getInstance().apply { time = date }
-            cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
-        } catch (e: Exception) {
-            defaultHour * 60 + defaultMin
+    val parsedSchedule = remember(timings) {
+        fun parseMinutes(timeStr: String?, defaultHour: Int, defaultMin: Int): Int {
+            if (timeStr == null) return defaultHour * 60 + defaultMin
+            return try {
+                val date = sdf.parse(timeStr) ?: return defaultHour * 60 + defaultMin
+                val cal = Calendar.getInstance().apply { time = date }
+                cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+            } catch (e: Exception) {
+                defaultHour * 60 + defaultMin
+            }
         }
+        intArrayOf(
+            parseMinutes(timings["Fajr"], 4, 30),
+            parseMinutes(timings["Sunrise"], 5, 45),
+            parseMinutes(timings["Dhuhr"], 12, 6),
+            parseMinutes(timings["Asr"], 16, 37),
+            parseMinutes(timings["Maghrib"], 18, 25),
+            parseMinutes(timings["Isha"], 19, 35)
+        )
     }
 
-    val fajrStart = parseMinutes(timings["Fajr"], 4, 30)
-    val sunriseTime = parseMinutes(timings["Sunrise"], 5, 45)
-    val dhuhrStart = parseMinutes(timings["Dhuhr"], 12, 6)
-    val asrStart = parseMinutes(timings["Asr"], 16, 37)
-    val maghribStart = parseMinutes(timings["Maghrib"], 18, 25)
-    val ishaStart = parseMinutes(timings["Isha"], 19, 35)
+    val fajrStart = parsedSchedule[0]
+    val sunriseTime = parsedSchedule[1]
+    val dhuhrStart = parsedSchedule[2]
+    val asrStart = parsedSchedule[3]
+    val maghribStart = parsedSchedule[4]
+    val ishaStart = parsedSchedule[5]
 
     // Current waqt evaluation
     val currentWaqt: PrayerWaqt
@@ -373,34 +384,19 @@ fun PrayerSceneryCard(
     }
 
     // Format start and end times in 12hr format e.g. "১২:০৬ PM - ০৪:৩৭ PM"
-    fun formatMinutesTo12Hr(totalMins: Int): String {
-        val h = totalMins / 60
-        val m = totalMins % 60
-        val cal = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, h)
-            set(Calendar.MINUTE, m)
+    val timeRangeStr = remember(currentStartMinutes, currentEndMinutes, isBn) {
+        fun formatMinutesTo12Hr(totalMins: Int): String {
+            val h = totalMins / 60
+            val m = totalMins % 60
+            val cal = Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, h)
+                set(Calendar.MINUTE, m)
+            }
+            val formatted = sdf12.format(cal.time)
+            return if (isBn) toBanglaDigits(formatted) else formatted
         }
-        val formatted = sdf12.format(cal.time)
-        return if (isBn) toBanglaDigits(formatted) else formatted
+        "${formatMinutesTo12Hr(currentStartMinutes)} - ${formatMinutesTo12Hr(currentEndMinutes)}"
     }
-
-    val timeRangeStr = "${formatMinutesTo12Hr(currentStartMinutes)} - ${formatMinutesTo12Hr(currentEndMinutes)}"
-
-    // Calculate countdown to next waqt
-    val targetSecondsToday = nextWaqtTargetMinute * 60
-    val currentSecondsToday = currentTotalMinutes * 60 + currentSecond
-    val diffSeconds = if (isNextTomorrow || targetSecondsToday < currentSecondsToday) {
-        (24 * 3600 - currentSecondsToday) + targetSecondsToday
-    } else {
-        targetSecondsToday - currentSecondsToday
-    }
-
-    val countdownHours = (diffSeconds / 3600).coerceAtLeast(0)
-    val countdownMinutes = ((diffSeconds % 3600) / 60).coerceAtLeast(0)
-    val countdownSecs = (diffSeconds % 60).coerceAtLeast(0)
-
-    val rawCountdownStr = String.format(Locale.US, "%02d:%02d:%02d", countdownHours, countdownMinutes, countdownSecs)
-    val countdownDisplay = if (isBn) toBanglaDigits(rawCountdownStr) else rawCountdownStr
 
     val currentWaqtTitle = if (isBn) currentWaqt.nameBn else currentWaqt.nameEn
     val nextWaqtTitle = if (isBn) nextWaqtNameBn else nextWaqtNameEn
@@ -557,14 +553,11 @@ fun PrayerSceneryCard(
 
                     Spacer(modifier = Modifier.height(4.dp))
 
-                    // Large Digital Countdown Clock
-                    Text(
-                        text = countdownDisplay,
-                        color = Color.White,
-                        fontSize = 38.sp,
-                        fontWeight = FontWeight.Black,
-                        letterSpacing = 1.5.sp,
-                        textAlign = TextAlign.Center
+                    // Large Digital Countdown Clock (Isolated 1-second recomposition scope)
+                    PrayerSceneryCountdownText(
+                        nextWaqtTargetMinute = nextWaqtTargetMinute,
+                        isNextTomorrow = isNextTomorrow,
+                        isBn = isBn
                     )
                 }
 
@@ -676,6 +669,58 @@ fun PrayerSceneryCard(
             }
         )
     }
+}
+
+@Composable
+private fun PrayerSceneryCountdownText(
+    nextWaqtTargetMinute: Int,
+    isNextTomorrow: Boolean,
+    isBn: Boolean
+) {
+    var countdownDisplay by remember(nextWaqtTargetMinute, isNextTomorrow, isBn) {
+        mutableStateOf(
+            computePrayerCountdown(nextWaqtTargetMinute, isNextTomorrow, isBn)
+        )
+    }
+
+    LaunchedEffect(nextWaqtTargetMinute, isNextTomorrow, isBn) {
+        while (true) {
+            countdownDisplay = computePrayerCountdown(nextWaqtTargetMinute, isNextTomorrow, isBn)
+            delay(1000L)
+        }
+    }
+
+    Text(
+        text = countdownDisplay,
+        color = Color.White,
+        fontSize = 38.sp,
+        fontWeight = FontWeight.Black,
+        letterSpacing = 1.5.sp,
+        textAlign = TextAlign.Center
+    )
+}
+
+private fun computePrayerCountdown(
+    nextWaqtTargetMinute: Int,
+    isNextTomorrow: Boolean,
+    isBn: Boolean
+): String {
+    val cal = Calendar.getInstance()
+    val currentSecondsToday =
+        cal.get(Calendar.HOUR_OF_DAY) * 3600 +
+            cal.get(Calendar.MINUTE) * 60 +
+            cal.get(Calendar.SECOND)
+    val targetSecondsToday = nextWaqtTargetMinute * 60
+    val diffSeconds = if (isNextTomorrow || targetSecondsToday < currentSecondsToday) {
+        (24 * 3600 - currentSecondsToday) + targetSecondsToday
+    } else {
+        targetSecondsToday - currentSecondsToday
+    }
+    val countdownHours = (diffSeconds / 3600).coerceAtLeast(0)
+    val countdownMinutes = ((diffSeconds % 3600) / 60).coerceAtLeast(0)
+    val countdownSecs = (diffSeconds % 60).coerceAtLeast(0)
+    val rawCountdownStr = String.format(Locale.US, "%02d:%02d:%02d", countdownHours, countdownMinutes, countdownSecs)
+    return if (isBn) toBanglaDigits(rawCountdownStr) else rawCountdownStr
 }
 
 /**

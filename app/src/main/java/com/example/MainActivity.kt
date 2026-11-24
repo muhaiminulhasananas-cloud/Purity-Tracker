@@ -23,6 +23,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -39,9 +40,11 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
@@ -57,6 +60,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewModelScope
@@ -85,7 +89,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
@@ -1646,6 +1649,11 @@ class MainActivity : ComponentActivity() {
         }
         PremiumManager.init(this)
         com.example.ui.theme.GlassTheme.isLightMode.value = false
+        try {
+            val pref = getSharedPreferences("Settings", Context.MODE_PRIVATE)
+            val lang = pref.getString("language", "en") ?: "en"
+            LanguageStore.currentLanguage.value = lang
+        } catch (e: Exception) {}
         
         if (intent?.action == "com.example.VPN_CONFIGURE") {
             triggerGuardianAlert(this, "attempted to open VPN configuration or disconnect the VPN Shield")
@@ -1659,12 +1667,6 @@ class MainActivity : ComponentActivity() {
             try {
                 val appPref = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
                 appPref.edit().putBoolean("is_light_mode", false).apply()
-            } catch (e: Exception) {}
-            
-            try {
-                val pref = getSharedPreferences("Settings", Context.MODE_PRIVATE)
-                val lang = pref.getString("language", "en") ?: "en"
-                LanguageStore.currentLanguage.value = lang
             } catch (e: Exception) {}
 
             try {
@@ -1921,20 +1923,37 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                AppScreen(
-                    currentTab = currentTab, 
-                    onTabSelected = handleTabSelect,
-                    onNavigateBack = handleBackNavigation,
-                    canGoBack = (tabBackStack.size > 1 || currentTab != "home")
-                )
+                var showSplash by rememberSaveable { mutableStateOf(true) }
+                LaunchedEffect(Unit) {
+                    if (showSplash) {
+                        delay(1900L)
+                        showSplash = false
+                    }
+                }
 
-                GlassCallOverlay(
-                    callSession = callSession,
-                    onAccept = { VoiceCallManager.acceptCall(context) },
-                    onEndCall = { VoiceCallManager.endCall() },
-                    onToggleMute = { VoiceCallManager.toggleMute() },
-                    onToggleSpeaker = { VoiceCallManager.toggleSpeaker() }
-                )
+                Box(modifier = Modifier.fillMaxSize()) {
+                    AppScreen(
+                        currentTab = currentTab,
+                        onTabSelected = handleTabSelect,
+                        onNavigateBack = handleBackNavigation,
+                        canGoBack = (tabBackStack.size > 1 || currentTab != "home")
+                    )
+
+                    GlassCallOverlay(
+                        callSession = callSession,
+                        onAccept = { VoiceCallManager.acceptCall(context) },
+                        onEndCall = { VoiceCallManager.endCall() },
+                        onToggleMute = { VoiceCallManager.toggleMute() },
+                        onToggleSpeaker = { VoiceCallManager.toggleSpeaker() }
+                    )
+
+                    SplashScreenOverlay(
+                        visible = showSplash,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .zIndex(100f)
+                    )
+                }
             }
         }
     }
@@ -2379,24 +2398,97 @@ fun AppScreen(
         initialPage = if (isMainTab) targetPageIndex else 0,
         pageCount = { mainTabs.size }
     )
+    var programmaticScrollCount by remember { mutableIntStateOf(0) }
+    var pendingTargetTab by remember { mutableStateOf<String?>(null) }
+    var wasMainTab by remember { mutableStateOf(isMainTab) }
 
-    var isFriendsSubViewActive by remember { mutableStateOf(false) }
-
-    // Scroll pager when currentTab changes externally (e.g. bottom nav tab click)
-    LaunchedEffect(currentTab) {
-        if (isMainTab && pagerState.currentPage != targetPageIndex) {
-            pagerState.animateScrollToPage(targetPageIndex)
+    // Single source of truth for bottom nav highlight:
+    // - When a programmatic tab selection is pending/animating, show that target immediately on frame 0.
+    // - During user swipes or idle on main tabs, reflect pagerState.targetPage immediately.
+    val activeNavTab by remember(currentTab, isMainTab) {
+        derivedStateOf {
+            when {
+                !isMainTab -> currentTab
+                pendingTargetTab != null -> pendingTargetTab!!
+                programmaticScrollCount > 0 -> currentTab
+                else -> mainTabs[pagerState.targetPage.coerceIn(0, mainTabs.lastIndex)]
+            }
         }
     }
 
-    // Update currentTab when user swipes pager horizontally
+    var isFriendsSubViewActive by remember { mutableStateOf(false) }
+
+    val latestCurrentTab by rememberUpdatedState(currentTab)
+    val latestIsMainTab by rememberUpdatedState(isMainTab)
+    val latestOnTabSelected by rememberUpdatedState(onTabSelected)
+
+    // Single driver for programmatic pager navigation (bottom nav taps, back button, deep links, sub-screen return)
+    LaunchedEffect(currentTab, isMainTab) {
+        val returningFromSubScreen = !wasMainTab && isMainTab
+        wasMainTab = isMainTab
+        if (isMainTab && targetPageIndex in mainTabs.indices) {
+            if (pagerState.currentPage != targetPageIndex || pagerState.targetPage != targetPageIndex) {
+                programmaticScrollCount++
+                try {
+                    if (returningFromSubScreen) {
+                        pagerState.scrollToPage(targetPageIndex)
+                    } else {
+                        val distance = kotlin.math.abs(pagerState.currentPage - targetPageIndex)
+                        if (distance > 1) {
+                            pagerState.animateScrollToPage(
+                                page = targetPageIndex,
+                                animationSpec = tween(
+                                    durationMillis = 240,
+                                    easing = androidx.compose.animation.core.FastOutSlowInEasing
+                                )
+                            )
+                        } else {
+                            pagerState.animateScrollToPage(
+                                page = targetPageIndex,
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                    stiffness = Spring.StiffnessMediumLow
+                                )
+                            )
+                        }
+                    }
+                } finally {
+                    programmaticScrollCount = (programmaticScrollCount - 1).coerceAtLeast(0)
+                    if (pendingTargetTab == currentTab) {
+                        pendingTargetTab = null
+                    }
+                }
+            } else if (pendingTargetTab == currentTab) {
+                pendingTargetTab = null
+            }
+        } else {
+            pendingTargetTab = null
+        }
+    }
+
+    // Sync user horizontal swipes back to currentTab using fresh state (never stale closure)
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.settledPage }.collect { pageIndex ->
-            if (pageIndex in mainTabs.indices) {
+            if (programmaticScrollCount == 0 && pendingTargetTab == null && latestIsMainTab && pageIndex in mainTabs.indices) {
                 val swipedTab = mainTabs[pageIndex]
-                if (swipedTab != currentTab && isMainTab) {
-                    onTabSelected(swipedTab)
+                if (swipedTab != latestCurrentTab) {
+                    latestOnTabSelected(swipedTab)
                 }
+            }
+        }
+    }
+
+    // Bottom nav tap handler: sets pending target for instant frame-0 highlight and delegates scroll to single driver
+    val handleBottomNavSelect: (String) -> Unit = remember(mainTabs) {
+        { selectedId ->
+            if (selectedId in mainTabs && latestIsMainTab) {
+                if (selectedId != latestCurrentTab) {
+                    pendingTargetTab = selectedId
+                    latestOnTabSelected(selectedId)
+                }
+            } else {
+                pendingTargetTab = null
+                latestOnTabSelected(selectedId)
             }
         }
     }
@@ -2415,7 +2507,7 @@ fun AppScreen(
                             if (!isPremium && currentTab != "premium") {
                                 BannerAdView(modifier = Modifier.background(Color.Transparent))
                             }
-                            AppBottomNav(currentTab, onTabSelected)
+                            AppBottomNav(activeNavTab, handleBottomNavSelect)
                         }
                     }
                 },
@@ -2432,7 +2524,8 @@ fun AppScreen(
                         state = pagerState,
                         modifier = Modifier.fillMaxSize(),
                         userScrollEnabled = !isFriendsSubViewActive && !isInsideChat,
-                        beyondViewportPageCount = 0
+                        beyondViewportPageCount = 1,
+                        key = { mainTabs[it] }
                     ) { page ->
                         when (mainTabs[page]) {
                             "home" -> HomeScreen(
@@ -2440,7 +2533,7 @@ fun AppScreen(
                                 onNavigateToFocus = { onTabSelected("focus") },
                                 onNavigateToAI = { showUniversalAiSheet = true },
                                 onNavigateToWinterArc = { onTabSelected("winter_arc") },
-                                onNavigateToSalah = { onTabSelected("salah") },
+                                onNavigateToSalah = { handleBottomNavSelect("salah") },
                                 onNavigateToBlocker = { onTabSelected("blocker") }
                             )
                             "salah" -> SalahTracker(
@@ -2449,11 +2542,11 @@ fun AppScreen(
                             )
                             "history" -> HistoryScreen()
                             "community" -> CommunityScreen(
-                                onTabSelected = onTabSelected,
+                                onTabSelected = handleBottomNavSelect,
                                 onSubViewActiveChanged = { active -> isFriendsSubViewActive = active }
                             )
                             "profile" -> ProfileScreen(
-                                onNavigateToStaticPage = onTabSelected,
+                                onNavigateToStaticPage = handleBottomNavSelect,
                                 onNavigateToPremium = { onTabSelected("premium") }
                             )
                         }
@@ -2504,18 +2597,22 @@ fun AppBottomNav(currentTab: String, onTabSelected: (String) -> Unit) {
     val socialViewModel: SocialViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
     val unreadCounts by socialViewModel.unreadCounts.collectAsState()
     val pendingRequests by socialViewModel.friendRequests.collectAsState()
-    val totalCommunityBadge = unreadCounts.values.sum() + pendingRequests.size
+    val totalCommunityBadge = remember(unreadCounts, pendingRequests) {
+        unreadCounts.values.sum() + pendingRequests.size
+    }
     val isLightMode = com.example.ui.theme.GlassTheme.isLightMode.value
 
     val isBn = LanguageStore.currentLanguage.value == "bn"
 
-    val tabs = listOf(
-        NavItemData("home", if (isBn) "হোম" else "Home", Icons.Outlined.Home),
-        NavItemData("salah", if (isBn) "সালাত" else "Salah", Icons.Outlined.Bedtime),
-        NavItemData("history", if (isBn) "হিস্ট্রি" else "History", Icons.Outlined.Schedule),
-        NavItemData("community", if (isBn) "কমিউনিটি" else "Community", Icons.Outlined.People, badgeCount = totalCommunityBadge),
-        NavItemData("profile", if (isBn) "অ্যাকাউন্ট" else "Account", Icons.Outlined.Person)
-    )
+    val tabs = remember(isBn, totalCommunityBadge) {
+        listOf(
+            NavItemData("home", if (isBn) "হোম" else "Home", Icons.Outlined.Home),
+            NavItemData("salah", if (isBn) "সালাত" else "Salah", Icons.Outlined.Bedtime),
+            NavItemData("history", if (isBn) "হিস্ট্রি" else "History", Icons.Outlined.Schedule),
+            NavItemData("community", if (isBn) "কমিউনিটি" else "Community", Icons.Outlined.People, badgeCount = totalCommunityBadge),
+            NavItemData("profile", if (isBn) "অ্যাকাউন্ট" else "Account", Icons.Outlined.Person)
+        )
+    }
 
     Surface(
         color = Color.Transparent,
@@ -2636,12 +2733,23 @@ fun HistoryScreen(
 
     val recordDays = maxOf(currentDurationDays, bestRecord?.durationDays ?: 0)
     val dynamicBadges by badgesViewModel.badges.collectAsStateWithLifecycle()
-    val currentBadge = dynamicBadges.lastOrNull { currentDurationDays >= it.requiredDays }
-        ?: dynamicBadges.firstOrNull()
-        ?: CustomBadge("", "Bronze Warrior", 0, "", "")
-    val earnedBadges = dynamicBadges.filter { currentDurationDays >= it.requiredDays }.sortedByDescending { it.requiredDays }
-    val unearnedBadges = dynamicBadges.filter { currentDurationDays < it.requiredDays }.sortedBy { it.requiredDays }
-    val nextBadge = dynamicBadges.firstOrNull { it.requiredDays > currentDurationDays }
+    val currentBadge = remember(dynamicBadges, currentDurationDays) {
+        dynamicBadges.lastOrNull { currentDurationDays >= it.requiredDays }
+            ?: dynamicBadges.firstOrNull()
+            ?: CustomBadge("", "Bronze Warrior", 0, "", "")
+    }
+    val earnedCount = remember(dynamicBadges, currentDurationDays) {
+        dynamicBadges.count { currentDurationDays >= it.requiredDays }
+    }
+    val unearnedCount = remember(dynamicBadges, earnedCount) {
+        (dynamicBadges.size - earnedCount).coerceAtLeast(0)
+    }
+    val badgeRows = remember(dynamicBadges) {
+        dynamicBadges.chunked(3)
+    }
+    val nextBadge = remember(dynamicBadges, currentDurationDays) {
+        dynamicBadges.firstOrNull { it.requiredDays > currentDurationDays }
+    }
     val nextDaysReq = nextBadge?.requiredDays ?: currentBadge.requiredDays
     val prevDaysReq = currentBadge.requiredDays
     val currentBadgeProgress = if (nextBadge != null && nextDaysReq > prevDaysReq) {
@@ -2654,395 +2762,408 @@ fun HistoryScreen(
     var itemToDelete by remember { mutableStateOf<SessionHistory?>(null) }
     val formatter = remember { java.text.SimpleDateFormat("dd MMM yyyy, hh:mm a", java.util.Locale.getDefault()) }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         // Screen Title
-        Text(
-            text = if (isBn) "হিস্ট্রি ও মাইলস্টোন" else "History",
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            color = titleColor
-        )
+        item(key = "history_title") {
+            Text(
+                text = if (isBn) "হিস্ট্রি ও মাইলস্টোন" else "History",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                color = titleColor
+            )
+        }
 
         // Current Active Badge Hero Card (Glass UI matching Screenshot 2)
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color.Transparent),
-            shape = RoundedCornerShape(20.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .glassCard(cornerSize = 20.dp, glassAlpha = 0.95f, hasSheen = true),
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-        ) {
-            Column(
+        item(key = "history_hero_card") {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+                shape = RoundedCornerShape(20.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(18.dp)
+                    .glassCard(cornerSize = 20.dp, glassAlpha = 0.95f, hasSheen = true),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp)
                 ) {
-                    // Golden Trophy Glow Circular Badge Container (Auto-cropped full circle fill)
-                    Box(
-                        modifier = Modifier.size(68.dp),
-                        contentAlignment = Alignment.Center
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Golden Trophy Glow Circular Badge Container (Auto-cropped full circle fill)
                         Box(
-                            modifier = Modifier
-                                .size(68.dp)
-                                .background(
-                                    brush = androidx.compose.ui.graphics.Brush.radialGradient(
-                                        colors = listOf(Color(0xFFF59E0B).copy(alpha = 0.35f), Color.Transparent)
-                                    ),
-                                    shape = CircleShape
-                                )
-                        )
-                        Box(
-                            modifier = Modifier
-                                .size(60.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    brush = androidx.compose.ui.graphics.Brush.verticalGradient(
-                                        colors = listOf(Color(0xFFFDE047), Color(0xFFD97706))
-                                    ),
-                                    shape = CircleShape
-                                ),
+                            modifier = Modifier.size(68.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            if (currentBadge.imageUrl.isNotEmpty()) {
-                                BadgeImage(
-                                    imageUrl = currentBadge.imageUrl,
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .clip(CircleShape)
-                                        .graphicsLayer(scaleX = 1.14f, scaleY = 1.14f),
-                                    fallbackName = currentBadge.name,
-                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Filled.EmojiEvents,
-                                    contentDescription = null,
-                                    tint = Color(0xFF78350F),
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
                             Box(
                                 modifier = Modifier
-                                    .fillMaxSize()
-                                    .border(2.dp, Color(0xFFFBBF24), CircleShape)
+                                    .size(68.dp)
+                                    .background(
+                                        brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                                            colors = listOf(Color(0xFFF59E0B).copy(alpha = 0.35f), Color.Transparent)
+                                        ),
+                                        shape = CircleShape
+                                    )
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(60.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        brush = androidx.compose.ui.graphics.Brush.verticalGradient(
+                                            colors = listOf(Color(0xFFFDE047), Color(0xFFD97706))
+                                        ),
+                                        shape = CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (currentBadge.imageUrl.isNotEmpty()) {
+                                    BadgeImage(
+                                        imageUrl = currentBadge.imageUrl,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clip(CircleShape)
+                                            .graphicsLayer(scaleX = 1.14f, scaleY = 1.14f),
+                                        fallbackName = currentBadge.name,
+                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Filled.EmojiEvents,
+                                        contentDescription = null,
+                                        tint = Color(0xFF78350F),
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .border(2.dp, Color(0xFFFBBF24), CircleShape)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = (if (isBn) "বর্তমান অর্জিত ব্যাজ" else "CURRENT BADGE").uppercase(),
+                                color = Color(0xFF38BDF8),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = getCustomBadgeName(currentBadge),
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = titleColor
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (isBn) "$currentDurationDays দিন স্ট্রিক · সেরা $recordDays দিন" else "$currentDurationDays days streak · Best $recordDays days",
+                                fontSize = 12.5.sp,
+                                color = descColor
                             )
                         }
                     }
 
-                    Spacer(modifier = Modifier.width(16.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
 
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = (if (isBn) "বর্তমান অর্জিত ব্যাজ" else "CURRENT BADGE").uppercase(),
-                            color = Color(0xFF38BDF8),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp
+                    // Linear Progress Indicator
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(5.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(if (isLightMode) Color(0xFFE2E8F0) else Color.White.copy(alpha = 0.14f))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(currentBadgeProgress.coerceIn(0.06f, 1f))
+                                .fillMaxHeight()
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(Color(0xFF38BDF8), Color(0xFFFBBF24))
+                                    ),
+                                    RoundedCornerShape(3.dp)
+                                )
                         )
-                        Spacer(modifier = Modifier.height(2.dp))
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            text = getCustomBadgeName(currentBadge),
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = titleColor
+                            text = if (isBn) "পরবর্তী: ${if (nextBadge != null) getCustomBadgeName(nextBadge) else "সর্বোচ্চ"}"
+                                   else "Next: ${nextBadge?.name ?: "Max"}",
+                            fontSize = 11.5.sp,
+                            color = descColor
                         )
-                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = if (isBn) "$currentDurationDays দিন স্ট্রিক · সেরা $recordDays দিন" else "$currentDurationDays days streak · Best $recordDays days",
-                            fontSize = 12.5.sp,
+                            text = if (nextBadge != null) {
+                                if (isBn) "${maxOf(0, nextDaysReq - currentDurationDays)} দিন বাকি"
+                                else "${maxOf(0, nextDaysReq - currentDurationDays)} days left"
+                            } else {
+                                if (isBn) "সর্বোচ্চ স্তরে আছেন" else "Completed"
+                            },
+                            fontSize = 11.5.sp,
                             color = descColor
                         )
                     }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Linear Progress Indicator
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(5.dp)
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(if (isLightMode) Color(0xFFE2E8F0) else Color.White.copy(alpha = 0.14f))
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(currentBadgeProgress.coerceIn(0.06f, 1f))
-                            .fillMaxHeight()
-                            .background(
-                                Brush.horizontalGradient(
-                                    listOf(Color(0xFF38BDF8), Color(0xFFFBBF24))
-                                ),
-                                RoundedCornerShape(3.dp)
-                            )
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (isBn) "পরবর্তী: ${if (nextBadge != null) getCustomBadgeName(nextBadge) else "সর্বোচ্চ"}"
-                               else "Next: ${nextBadge?.name ?: "Max"}",
-                        fontSize = 11.5.sp,
-                        color = descColor
-                    )
-                    Text(
-                        text = if (nextBadge != null) {
-                            if (isBn) "${maxOf(0, nextDaysReq - currentDurationDays)} দিন বাকি"
-                            else "${maxOf(0, nextDaysReq - currentDurationDays)} days left"
-                        } else {
-                            if (isBn) "সর্বোচ্চ স্তরে আছেন" else "Completed"
-                        },
-                        fontSize = 11.5.sp,
-                        color = descColor
-                    )
                 }
             }
         }
 
         // Section: Milestones (3-Column Compact Grid matching Screenshot 2)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = if (isBn) "মাইলস্টোনসমূহ" else "Milestones",
-                color = titleColor,
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp
-            )
-            Text(
-                text = if (isBn) "${earnedBadges.size} অর্জিত · ${unearnedBadges.size} লকড"
-                       else "${earnedBadges.size} earned · ${unearnedBadges.size} locked",
-                color = descColor,
-                fontSize = 12.sp
-            )
+        item(key = "history_milestones_header") {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = if (isBn) "মাইলস্টোনসমূহ" else "Milestones",
+                    color = titleColor,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                Text(
+                    text = if (isBn) "$earnedCount অর্জিত · $unearnedCount লকড"
+                           else "$earnedCount earned · $unearnedCount locked",
+                    color = descColor,
+                    fontSize = 12.sp
+                )
+            }
         }
 
-        // 3-Column Compact Milestone Cards Grid
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            dynamicBadges.chunked(3).forEach { rowBadges ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    rowBadges.forEach { badge ->
-                        val isUnlocked = currentDurationDays >= badge.requiredDays
-                        Card(
+        // 3-Column Compact Milestone Cards Grid (Lazy row items for instant tab switch & 120Hz scroll)
+        itemsIndexed(
+            items = badgeRows,
+            key = { idx, row -> "badge_row_${idx}_${row.firstOrNull()?.id ?: ""}" }
+        ) { _, rowBadges ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                rowBadges.forEach { badge ->
+                    val isUnlocked = currentDurationDays >= badge.requiredDays
+                    Card(
+                        modifier = Modifier
+                            .weight(1f)
+                            .defaultMinSize(minHeight = 122.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+                        border = BorderStroke(
+                            if (isUnlocked) 1.2.dp else 1.dp,
+                            if (isUnlocked) Color(0xFFF59E0B).copy(alpha = 0.68f)
+                            else Color.White.copy(alpha = if (isLightMode) 0.14f else 0.14f)
+                        )
+                    ) {
+                        Box(
                             modifier = Modifier
-                                .weight(1f)
-                                .defaultMinSize(minHeight = 122.dp),
-                            shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color.Transparent),
-                            border = BorderStroke(
-                                if (isUnlocked) 1.2.dp else 1.dp,
-                                if (isUnlocked) Color(0xFFF59E0B).copy(alpha = 0.68f)
-                                else Color.White.copy(alpha = if (isLightMode) 0.14f else 0.14f)
-                            )
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 122.dp)
+                                .background(
+                                    if (isUnlocked) {
+                                        if (isLightMode) Color(0xFFFEF3C7).copy(alpha = 0.85f) else Color(0xFF1E170A).copy(alpha = 0.65f)
+                                    } else {
+                                        if (isLightMode) Color(0xFFF1F5F9).copy(alpha = 0.5f) else Color.White.copy(alpha = 0.06f)
+                                    }
+                                )
+                                .padding(vertical = 12.dp, horizontal = 6.dp),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .defaultMinSize(minHeight = 122.dp)
-                                    .background(
-                                        if (isUnlocked) {
-                                            if (isLightMode) Color(0xFFFEF3C7).copy(alpha = 0.85f) else Color(0xFF1E170A).copy(alpha = 0.65f)
-                                        } else {
-                                            if (isLightMode) Color(0xFFF1F5F9).copy(alpha = 0.5f) else Color.White.copy(alpha = 0.06f)
-                                        }
-                                    )
-                                    .padding(vertical = 12.dp, horizontal = 6.dp),
-                                contentAlignment = Alignment.Center
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
                             ) {
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.Center
+                                Box(
+                                    modifier = Modifier
+                                        .size(42.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            if (isUnlocked) Color(0xFFF59E0B).copy(alpha = 0.20f) else Color.White.copy(alpha = 0.08f),
+                                            CircleShape
+                                        )
+                                        .border(
+                                            1.5.dp,
+                                            if (isUnlocked) Color(0xFFFBBF24) else Color.White.copy(alpha = 0.16f),
+                                            CircleShape
+                                        ),
+                                    contentAlignment = Alignment.Center
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(42.dp)
-                                            .clip(CircleShape)
-                                            .background(
-                                                if (isUnlocked) Color(0xFFF59E0B).copy(alpha = 0.20f) else Color.White.copy(alpha = 0.08f),
-                                                CircleShape
+                                    if (isUnlocked) {
+                                        if (badge.imageUrl.isNotEmpty()) {
+                                            BadgeImage(
+                                                imageUrl = badge.imageUrl,
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .clip(CircleShape)
+                                                    .graphicsLayer(scaleX = 1.14f, scaleY = 1.14f),
+                                                fallbackName = badge.name,
+                                                contentScale = androidx.compose.ui.layout.ContentScale.Crop
                                             )
-                                            .border(
-                                                1.5.dp,
-                                                if (isUnlocked) Color(0xFFFBBF24) else Color.White.copy(alpha = 0.16f),
-                                                CircleShape
-                                            ),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        if (isUnlocked) {
-                                            if (badge.imageUrl.isNotEmpty()) {
-                                                BadgeImage(
-                                                    imageUrl = badge.imageUrl,
-                                                    modifier = Modifier
-                                                        .fillMaxSize()
-                                                        .clip(CircleShape)
-                                                        .graphicsLayer(scaleX = 1.14f, scaleY = 1.14f),
-                                                    fallbackName = badge.name,
-                                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                                                )
-                                            } else {
-                                                Icon(
-                                                    Icons.Filled.EmojiEvents,
-                                                    contentDescription = null,
-                                                    tint = Color(0xFFFBBF24),
-                                                    modifier = Modifier.size(20.dp)
-                                                )
-                                            }
                                         } else {
                                             Icon(
-                                                Icons.Outlined.Lock,
+                                                Icons.Filled.EmojiEvents,
                                                 contentDescription = null,
-                                                tint = if (isLightMode) Color(0xFF64748B) else Color.White.copy(alpha = 0.62f),
-                                                modifier = Modifier.size(16.dp)
+                                                tint = Color(0xFFFBBF24),
+                                                modifier = Modifier.size(20.dp)
                                             )
                                         }
+                                    } else {
+                                        Icon(
+                                            Icons.Outlined.Lock,
+                                            contentDescription = null,
+                                            tint = if (isLightMode) Color(0xFF64748B) else Color.White.copy(alpha = 0.62f),
+                                            modifier = Modifier.size(16.dp)
+                                        )
                                     }
-                                    Spacer(modifier = Modifier.height(7.dp))
-                                    Text(
-                                        text = getCustomBadgeName(badge),
-                                        color = titleColor,
-                                        fontSize = 11.5.sp,
-                                        lineHeight = 14.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        textAlign = TextAlign.Center
-                                    )
-                                    Spacer(modifier = Modifier.height(3.dp))
-                                    Text(
-                                        text = if (isUnlocked) {
-                                            if (isBn) "অর্জিত" else "Unlocked"
-                                        } else {
-                                            "${badge.requiredDays} ${if (isBn) "দিন" else "days"}"
-                                        },
-                                        color = if (isUnlocked) Color(0xFF10B981) else descColor,
-                                        fontSize = 10.5.sp,
-                                        lineHeight = 13.sp,
-                                        maxLines = 1,
-                                        fontWeight = if (isUnlocked) FontWeight.Bold else FontWeight.Normal,
-                                        textAlign = TextAlign.Center
-                                    )
                                 }
+                                Spacer(modifier = Modifier.height(7.dp))
+                                Text(
+                                    text = getCustomBadgeName(badge),
+                                    color = titleColor,
+                                    fontSize = 11.5.sp,
+                                    lineHeight = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center
+                                )
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = if (isUnlocked) {
+                                        if (isBn) "অর্জিত" else "Unlocked"
+                                    } else {
+                                        "${badge.requiredDays} ${if (isBn) "দিন" else "days"}"
+                                    },
+                                    color = if (isUnlocked) Color(0xFF10B981) else descColor,
+                                    fontSize = 10.5.sp,
+                                    lineHeight = 13.sp,
+                                    maxLines = 1,
+                                    fontWeight = if (isUnlocked) FontWeight.Bold else FontWeight.Normal,
+                                    textAlign = TextAlign.Center
+                                )
                             }
                         }
                     }
-                    repeat(3 - rowBadges.size) {
-                        Spacer(modifier = Modifier.weight(1f))
-                    }
+                }
+                repeat(3 - rowBadges.size) {
+                    Spacer(modifier = Modifier.weight(1f))
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
-
         // Section: Session History (Matching Screenshot 2)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = if (isBn) "সেশন হিস্ট্রি" else "Session history",
-                color = titleColor,
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp
-            )
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        item(key = "history_session_header") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
                 Text(
-                    text = if (isBn) "${historyList.size}টি সেশন" else "${historyList.size} sessions",
-                    color = descColor,
-                    fontSize = 12.sp
+                    text = if (isBn) "সেশন হিস্ট্রি" else "Session history",
+                    color = titleColor,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
                 )
-                if (historyList.isNotEmpty()) {
-                    Spacer(modifier = Modifier.width(8.dp))
-                    TextButton(
-                        onClick = { showClearAllDialog = true },
-                        colors = ButtonDefaults.textButtonColors(contentColor = RedAlert),
-                        shape = CircleShape,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                    ) {
-                        Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(15.dp))
-                        Spacer(modifier = Modifier.width(2.dp))
-                        Text(
-                            text = if (isBn) "মুছুন" else "Clear",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = if (isBn) "${historyList.size}টি সেশন" else "${historyList.size} sessions",
+                        color = descColor,
+                        fontSize = 12.sp
+                    )
+                    if (historyList.isNotEmpty()) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        TextButton(
+                            onClick = { showClearAllDialog = true },
+                            colors = ButtonDefaults.textButtonColors(contentColor = RedAlert),
+                            shape = CircleShape,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Text(
+                                text = if (isBn) "মুছুন" else "Clear",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
         }
 
         if (historyList.isEmpty()) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .glassCard(cornerSize = 16.dp),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.Transparent)
-            ) {
-                Row(
+            item(key = "history_empty_card") {
+                Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .glassCard(cornerSize = 16.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.Transparent)
                 ) {
-                    Box(
+                    Row(
                         modifier = Modifier
-                            .size(38.dp)
-                            .background(Color(0xFF10B981).copy(alpha = 0.18f), CircleShape),
-                        contentAlignment = Alignment.Center
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.Check,
-                            contentDescription = null,
-                            tint = Color(0xFF10B981),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(14.dp))
-                    Column {
-                        Text(
-                            text = if (isBn) "কোনো রিল্যাপ্স রেকর্ড নেই" else "No relapses recorded",
-                            color = titleColor,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = if (isBn) "আপনার হিস্ট্রি সম্পূর্ণ নিরাপদ ও পরিচ্ছন্ন।" else "Your history is completely clean.",
-                            color = descColor,
-                            fontSize = 12.sp
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .background(Color(0xFF10B981).copy(alpha = 0.18f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Check,
+                                contentDescription = null,
+                                tint = Color(0xFF10B981),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column {
+                            Text(
+                                text = if (isBn) "কোনো রিল্যাপ্স রেকর্ড নেই" else "No relapses recorded",
+                                color = titleColor,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (isBn) "আপনার হিস্ট্রি সম্পূর্ণ নিরাপদ ও পরিচ্ছন্ন।" else "Your history is completely clean.",
+                                color = descColor,
+                                fontSize = 12.sp
+                            )
+                        }
                     }
                 }
             }
         } else {
-            historyList.forEach { history ->
-                val hCal = Calendar.getInstance().apply { timeInMillis = history.startTime }
-                val hStartStr = formatter.format(hCal.time)
+            items(
+                items = historyList,
+                key = { history -> if (history.id != 0) history.id else history.startTime }
+            ) { history ->
+                val hStartStr = remember(history.startTime) {
+                    formatter.format(java.util.Date(history.startTime))
+                }
                 TrackedSessionItem(
                     title = history.title,
                     desc = "${if (isBn) "শুরু" else "Start"}: $hStartStr",
@@ -4224,8 +4345,10 @@ fun SalahTracker(
     val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
-        AdhanPlayer.initialize(context)
-        PrayerScheduler.scheduleDailyPrayers(context)
+        withContext(Dispatchers.IO) {
+            AdhanPlayer.initialize(context)
+            PrayerScheduler.scheduleDailyPrayers(context)
+        }
     }
 
     LazyColumn(
@@ -5520,18 +5643,28 @@ fun CommunityScreen(
                 val titleColor = if (isLightMode) Color(0xFF0F172A) else Color.White
                 val descColor = if (isLightMode) Color(0xFF1E293B) else Color(0xFFF1F5F9)
 
-                Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Outlined.EmojiEvents, contentDescription = null, tint = Color(0xFFFFD700))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(t("leaderboard_title") ?: "Global Leaderboard", color = titleColor, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 16.dp)
+                ) {
+                    item(key = "leaderboard_header") {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.EmojiEvents, contentDescription = null, tint = Color(0xFFFFD700))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(t("leaderboard_title") ?: "Global Leaderboard", color = titleColor, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        }
+                        Spacer(modifier = Modifier.height(14.dp))
                     }
-                    Spacer(modifier = Modifier.height(14.dp))
-                    
+
                     if (leaders.isEmpty()) {
-                        Text("No warriors found on leaderboard yet...", color = descColor)
+                        item(key = "leaderboard_empty") {
+                            Text("No warriors found on leaderboard yet...", color = descColor)
+                        }
                     } else {
-                        leaders.forEachIndexed { index, leader ->
+                        itemsIndexed(
+                            items = leaders,
+                            key = { idx, leader -> leader.id.ifEmpty { "leader_$idx" } }
+                        ) { index, leader ->
                             val days = java.util.concurrent.TimeUnit.MILLISECONDS.toDays(leader.streakMs).toInt()
                             val isLeaderPremium = leader.isPremium || (leader.id == currentUser?.uid && isPremiumUserState)
                             val effectivePhoto = if (leader.id == currentUser?.uid && !myUserProfile?.profilePicUrl.isNullOrEmpty()) {
@@ -5539,7 +5672,9 @@ fun CommunityScreen(
                             } else {
                                 leader.profilePicUrl
                             }
-                            val fallbackBadge = dynamicBadges.lastOrNull { days >= it.requiredDays } ?: dynamicBadges.firstOrNull()
+                            val fallbackBadge = remember(dynamicBadges, days) {
+                                dynamicBadges.lastOrNull { days >= it.requiredDays } ?: dynamicBadges.firstOrNull()
+                            }
                             val badgeTitle = if (leader.badge.isNotEmpty()) leader.badge else (fallbackBadge?.name ?: "Warrior")
 
                             val rankGlowBorder = when (index) {
@@ -5705,74 +5840,84 @@ fun CommunityScreen(
                 )
 
                 Box(modifier = Modifier.fillMaxSize().pullRefresh(pullRefreshState)) {
-                    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .glassCard(cornerSize = 20.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color.Transparent)
-                        ) {
-                            Column(modifier = Modifier.padding(16.dp)) {
-                                OutlinedTextField(
-                                    value = postText,
-                                    onValueChange = { postText = it },
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp),
-                                    placeholder = {
-                                        Text(
-                                            "Write something inspiring to fuel other warriors...",
-                                            color = Color(0xFF94A3B8),
-                                            fontSize = 14.sp
-                                        )
-                                    },
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        unfocusedBorderColor = Color.Transparent,
-                                        focusedBorderColor = Color.Transparent,
-                                        unfocusedContainerColor = Color.Transparent,
-                                        focusedContainerColor = Color.Transparent,
-                                        unfocusedTextColor = titleColor,
-                                        focusedTextColor = titleColor
-                                    ),
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Button(
-                                        onClick = {
-                                            if (postText.isNotBlank()) {
-                                                val streakText = if (LanguageStore.currentLanguage.value == "bn") "${days} দিনের স্ট্রিক" else "${days} days streak"
-                                                communityViewModel.addPost(postText, streakText, activeBadgeName)
-                                                postText = ""
-                                            }
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = 100.dp)
+                    ) {
+                        item(key = "board_composer") {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .glassCard(cornerSize = 20.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+                            ) {
+                                Column(modifier = Modifier.padding(16.dp)) {
+                                    OutlinedTextField(
+                                        value = postText,
+                                        onValueChange = { postText = it },
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp),
+                                        placeholder = {
+                                            Text(
+                                                "Write something inspiring to fuel other warriors...",
+                                                color = Color(0xFF94A3B8),
+                                                fontSize = 14.sp
+                                            )
                                         },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF38BDF8)),
-                                        shape = RoundedCornerShape(14.dp),
-                                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp)
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            unfocusedBorderColor = Color.Transparent,
+                                            focusedBorderColor = Color.Transparent,
+                                            unfocusedContainerColor = Color.Transparent,
+                                            focusedContainerColor = Color.Transparent,
+                                            unfocusedTextColor = titleColor,
+                                            focusedTextColor = titleColor
+                                        ),
+                                        shape = RoundedCornerShape(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.End,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text("Publish status", color = Color(0xFF061018), fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
+                                        Button(
+                                            onClick = {
+                                                if (postText.isNotBlank()) {
+                                                    val streakText = if (LanguageStore.currentLanguage.value == "bn") "${days} দিনের স্ট্রিক" else "${days} days streak"
+                                                    communityViewModel.addPost(postText, streakText, activeBadgeName)
+                                                    postText = ""
+                                                }
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF38BDF8)),
+                                            shape = RoundedCornerShape(14.dp),
+                                            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp)
+                                        ) {
+                                            Text("Publish status", color = Color(0xFF061018), fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
+                                        }
+                                    }
+
+                                    if (uploadProgress != null) {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text("Uploading: ${uploadProgress!!.toInt()}%", color = CyanAccent, fontSize = 12.sp)
+                                        androidx.compose.material3.LinearProgressIndicator(progress = { uploadProgress!! / 100f }, modifier = Modifier.fillMaxWidth(), color = CyanAccent, trackColor = Color.DarkGray)
                                     }
                                 }
-
-                                if (uploadProgress != null) {
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Text("Uploading: ${uploadProgress!!.toInt()}%", color = CyanAccent, fontSize = 12.sp)
-                                    androidx.compose.material3.LinearProgressIndicator(progress = uploadProgress!! / 100f, modifier = Modifier.fillMaxWidth(), color = CyanAccent, trackColor = Color.DarkGray)
-                                }
                             }
+
+                            Spacer(modifier = Modifier.height(18.dp))
+                            Text("Latest motivational board", color = titleColor, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Spacer(modifier = Modifier.height(10.dp))
                         }
 
-                        Spacer(modifier = Modifier.height(18.dp))
-                        Text("Latest motivational board", color = titleColor, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Spacer(modifier = Modifier.height(10.dp))
-                        
                         if (posts.isEmpty()) {
-                            Text("Loading posts or no posts yet...", color = descColor)
+                            item(key = "board_empty") {
+                                Text("Loading posts or no posts yet...", color = descColor)
+                            }
                         } else {
-                            posts.forEach { post ->
+                            items(
+                                items = posts,
+                                key = { post -> post.id.ifEmpty { "${post.timestamp}_${post.userId}" } }
+                            ) { post ->
                                 CommunityPost(
                                     post = post,
                                     currentUserId = currentUser?.uid ?: "",
@@ -5792,7 +5937,6 @@ fun CommunityScreen(
                                 )
                             }
                         }
-                        Spacer(modifier = Modifier.height(100.dp))
                     }
                     
                     if (selectedUserIdForProfile != null) {
@@ -7865,46 +8009,47 @@ fun ProfileScreen(
         }
     }
 
-    // Attempt to migrate cloud streak when logging in
-    LaunchedEffect(currentUser) {
-        if (currentUser == null) {
+    // Attempt to migrate cloud streak when logging in (cached per user UID to avoid redundant fetches on tab swipes)
+    LaunchedEffect(currentUser?.uid) {
+        val uid = currentUser?.uid
+        if (uid == null) {
             userProfileViewModel.clearProfile()
         } else {
-            // Clear wrong/previous profile caches if any
             val currentCachedProfile = userProfileViewModel.userProfile.value
-            if (currentCachedProfile != null && currentCachedProfile.userId != currentUser!!.uid) {
+            if (currentCachedProfile != null && currentCachedProfile.userId != uid) {
                 userProfileViewModel.clearProfile()
             }
-            userProfileViewModel.fetchProfile(currentUser!!.uid)
-            purityTrackerViewModel.syncCloudHistoryToLocal(currentUser!!.uid)
-            val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
-            db.collection("users").document(currentUser!!.uid).get().addOnSuccessListener { doc ->
-                val record = doc.toObject(LeaderboardUser::class.java)
-                val isMeAnas = currentUser?.email == "muhaiminulhasananas@gmail.com"
-                
-                var expiry = doc.getLong("premiumExpiryTimestamp") ?: 0L
-                var hasCloudPremium = doc.getBoolean("isPremium") == true || isMeAnas
-                
-                if (!isMeAnas && hasCloudPremium && expiry != 0L && System.currentTimeMillis() > expiry) {
-                    hasCloudPremium = false
-                    expiry = 0L
-                    db.collection("users").document(currentUser!!.uid).update(
-                        "isPremium", false,
-                        "premiumPlan", "expired",
-                        "premiumExpiryTimestamp", 0L
-                    )
-                }
-                
-                PremiumManager.setPremiumStatus(context, hasCloudPremium, expiry)
-                
-                if (record != null) {
-                    if (record.streakMs > 0) {
-                        val elapsed = System.currentTimeMillis() - record.timestamp
-                        val realStreak = record.streakMs + elapsed
-                        purityTrackerViewModel.restoreStreak(System.currentTimeMillis() - realStreak)
-                        // Cloud sync restores streak data silently in background without showing annoying black toast
-                    } else if (record.timestamp > 0) {
-                        purityTrackerViewModel.restoreStreak(System.currentTimeMillis())
+            if (currentCachedProfile == null || currentCachedProfile.userId != uid) {
+                userProfileViewModel.fetchProfile(uid)
+                purityTrackerViewModel.syncCloudHistoryToLocal(uid)
+                val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                db.collection("users").document(uid).get().addOnSuccessListener { doc ->
+                    val record = doc.toObject(LeaderboardUser::class.java)
+                    val isMeAnas = currentUser?.email == "muhaiminulhasananas@gmail.com"
+
+                    var expiry = doc.getLong("premiumExpiryTimestamp") ?: 0L
+                    var hasCloudPremium = doc.getBoolean("isPremium") == true || isMeAnas
+
+                    if (!isMeAnas && hasCloudPremium && expiry != 0L && System.currentTimeMillis() > expiry) {
+                        hasCloudPremium = false
+                        expiry = 0L
+                        db.collection("users").document(uid).update(
+                            "isPremium", false,
+                            "premiumPlan", "expired",
+                            "premiumExpiryTimestamp", 0L
+                        )
+                    }
+
+                    PremiumManager.setPremiumStatus(context, hasCloudPremium, expiry)
+
+                    if (record != null) {
+                        if (record.streakMs > 0) {
+                            val elapsed = System.currentTimeMillis() - record.timestamp
+                            val realStreak = record.streakMs + elapsed
+                            purityTrackerViewModel.restoreStreak(System.currentTimeMillis() - realStreak)
+                        } else if (record.timestamp > 0) {
+                            purityTrackerViewModel.restoreStreak(System.currentTimeMillis())
+                        }
                     }
                 }
             }
@@ -8311,6 +8456,7 @@ fun ProfileScreen(
          var isRecentsLockedProfile by remember { mutableStateOf(false) }
 
          LaunchedEffect(Unit) {
+             var checkedHealthOnce = false
              while (true) {
                  val status = withContext(Dispatchers.IO) {
                      val pin = LockManager.hasPin(context)
@@ -8321,18 +8467,21 @@ fun ProfileScreen(
                      val admin = AntiUninstallManager.isDeviceAdminActive(context)
                      val oemVisited = AntiUninstallManager.isOemAutoStartVisited(context)
                      val recentsLocked = AntiUninstallManager.isRecentsLockConfirmed(context)
-                     GuardHealthWorker.checkNowAndNotify(context)
+                     if (!checkedHealthOnce) {
+                         checkedHealthOnce = true
+                         GuardHealthWorker.checkNowAndNotify(context)
+                     }
                      listOf(pin, blocker, guardAlive, guardDead, battery, admin, oemVisited, recentsLocked)
                  }
-                 hasPinProfile = status[0]
-                 isBlockerActiveProfile = status[1]
-                 isGuardAliveProfile = status[2]
-                 isGuardDeadButEnabledProfile = status[3]
-                 isBatteryIgnoredProfile = status[4]
-                 isDeviceAdminProfile = status[5]
-                 isOemAutoStartVisitedProfile = status[6]
-                 isRecentsLockedProfile = status[7]
-                 kotlinx.coroutines.delay(1500)
+                 if (hasPinProfile != status[0]) hasPinProfile = status[0]
+                 if (isBlockerActiveProfile != status[1]) isBlockerActiveProfile = status[1]
+                 if (isGuardAliveProfile != status[2]) isGuardAliveProfile = status[2]
+                 if (isGuardDeadButEnabledProfile != status[3]) isGuardDeadButEnabledProfile = status[3]
+                 if (isBatteryIgnoredProfile != status[4]) isBatteryIgnoredProfile = status[4]
+                 if (isDeviceAdminProfile != status[5]) isDeviceAdminProfile = status[5]
+                 if (isOemAutoStartVisitedProfile != status[6]) isOemAutoStartVisitedProfile = status[6]
+                 if (isRecentsLockedProfile != status[7]) isRecentsLockedProfile = status[7]
+                 kotlinx.coroutines.delay(3000)
              }
          }
 
@@ -8851,6 +9000,283 @@ private fun EmergencyActionItem(
     }
 }
 
+private data class HomeGuardSnapshot(
+    val hasPin: Boolean,
+    val partnerEmail: String,
+    val isPartnerLocked: Boolean,
+    val isBlockerActive: Boolean,
+    val isAccAlive: Boolean,
+    val isAccDead: Boolean,
+    val isDeviceAdmin: Boolean,
+    val isBatteryExempt: Boolean,
+    val isOemAutoStartVisited: Boolean,
+    val isRecentsLockConfirmed: Boolean
+)
+
+@Composable
+private fun HeroAnimatedBadgeCircle(
+    currentBadge: CustomBadge,
+    progress: Float,
+    onClick: () -> Unit
+) {
+    val badgeInfiniteTransition = rememberInfiniteTransition(label = "hero_badge_anim")
+    val badgePulseScaleState = badgeInfiniteTransition.animateFloat(
+        initialValue = 1.0f,
+        targetValue = 1.055f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2000, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "badge_pulse_scale"
+    )
+    val badgeFloatOffsetYState = badgeInfiniteTransition.animateFloat(
+        initialValue = -2.5f,
+        targetValue = 2.5f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2200, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "badge_float_y"
+    )
+    val haloGlowAlphaState = badgeInfiniteTransition.animateFloat(
+        initialValue = 0.22f,
+        targetValue = 0.52f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1800, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "halo_glow_alpha"
+    )
+    val ringRotationDegState = badgeInfiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 5500, easing = androidx.compose.animation.core.LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "ring_rotation_deg"
+    )
+
+    val sweepBrush = remember {
+        Brush.sweepGradient(
+            colors = listOf(
+                Color.Transparent,
+                Color(0xFFFBBF24).copy(alpha = 0.25f),
+                Color(0xFFFDE047),
+                Color(0xFFF59E0B),
+                Color.Transparent
+            )
+        )
+    }
+    val innerCircleBrush = remember {
+        Brush.radialGradient(
+            colors = listOf(
+                Color(0xFFFDE047),
+                Color(0xFFF59E0B),
+                Color(0xFFD97706)
+            )
+        )
+    }
+
+    Box(
+        modifier = Modifier
+            .size(112.dp)
+            .graphicsLayer {
+                translationY = badgeFloatOffsetYState.value.dp.toPx()
+            }
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        // Soft ambient pulsing golden halo (draw-phase only, 0 recompositions)
+        Box(
+            modifier = Modifier
+                .size(110.dp)
+                .graphicsLayer {
+                    val s = badgePulseScaleState.value * 1.04f
+                    scaleX = s
+                    scaleY = s
+                }
+                .drawBehind {
+                    val alpha = haloGlowAlphaState.value
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                Color(0xFFF59E0B).copy(alpha = alpha),
+                                Color(0xFFFBBF24).copy(alpha = alpha * 0.35f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+                }
+        )
+        // Rotating luminous golden sweep ring (graphicsLayer lambda, 0 recompositions)
+        Canvas(
+            modifier = Modifier
+                .size(102.dp)
+                .graphicsLayer {
+                    rotationZ = ringRotationDegState.value
+                }
+        ) {
+            drawCircle(
+                brush = sweepBrush,
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3.dp.toPx())
+            )
+        }
+        // Outer progress arc ring
+        CircularProgressIndicator(
+            progress = { progress.coerceIn(0.08f, 1f) },
+            modifier = Modifier.size(102.dp),
+            color = Color(0xFFFBBF24),
+            trackColor = Color.White.copy(alpha = 0.10f),
+            strokeWidth = 3.5.dp,
+            strokeCap = StrokeCap.Round
+        )
+        // Inner Round Circle filled 100% by the auto-cropped badge image with breathing pulse
+        Box(
+            modifier = Modifier
+                .size(86.dp)
+                .graphicsLayer {
+                    val s = badgePulseScaleState.value
+                    scaleX = s
+                    scaleY = s
+                }
+                .clip(CircleShape)
+                .background(brush = innerCircleBrush, shape = CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            BadgeImage(
+                imageUrl = currentBadge.imageUrl,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape)
+                    .graphicsLayer(scaleX = 1.14f, scaleY = 1.14f),
+                fallbackName = currentBadge.name,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .border(2.dp, Color(0xFFFBBF24), CircleShape)
+            )
+        }
+    }
+}
+
+@Composable
+private fun HomeNextPrayerCard(
+    salahViewModel: SalahViewModel,
+    isBn: Boolean,
+    onNavigateToSalah: (() -> Unit)?
+) {
+    val todaySalahsHome by salahViewModel.todaySalahs.collectAsStateWithLifecycle()
+    val salahTimingsHome by salahViewModel.todayTimings.collectAsStateWithLifecycle()
+    val completedSalahsCount = remember(todaySalahsHome) { todaySalahsHome.count { it } }
+
+    // Pre-parse the 5 daily prayer target minutes once when timings change (no per-second Regex/SimpleDateFormat)
+    val parsedPrayers = remember(salahTimingsHome) {
+        val order = listOf("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")
+        order.mapNotNull { name ->
+            val raw = salahTimingsHome[name]?.trim()?.split(" ")?.firstOrNull() ?: return@mapNotNull null
+            val parts = raw.split(":")
+            if (parts.size >= 2) {
+                val h = parts[0].toIntOrNull() ?: return@mapNotNull null
+                val m = parts[1].toIntOrNull() ?: return@mapNotNull null
+                name to (h * 3600 + m * 60)
+            } else {
+                null
+            }
+        }
+    }
+
+    var nextPrayerTitleHome by remember { mutableStateOf("Dhuhr") }
+    var nextPrayerCountdownHome by remember { mutableStateOf("00:00:00") }
+
+    LaunchedEffect(parsedPrayers) {
+        if (parsedPrayers.isEmpty()) return@LaunchedEffect
+        while (true) {
+            val now = Calendar.getInstance()
+            val nowSec = now.get(Calendar.HOUR_OF_DAY) * 3600 +
+                now.get(Calendar.MINUTE) * 60 +
+                now.get(Calendar.SECOND)
+            var foundTitle = "Fajr"
+            var diffSec = 0
+            val upcoming = parsedPrayers.firstOrNull { (_, targetSec) -> nowSec < targetSec }
+            if (upcoming != null) {
+                foundTitle = upcoming.first
+                diffSec = (upcoming.second - nowSec).coerceAtLeast(0)
+            } else {
+                val fajrSec = parsedPrayers.firstOrNull { it.first == "Fajr" }?.second ?: 0
+                foundTitle = "Fajr"
+                diffSec = ((24 * 3600 - nowSec) + fajrSec).coerceAtLeast(0)
+            }
+            val h = diffSec / 3600
+            val m = (diffSec % 3600) / 60
+            val s = diffSec % 60
+            val formatted = String.format(java.util.Locale.US, "%02d:%02d:%02d", h, m, s)
+            if (nextPrayerTitleHome != foundTitle) nextPrayerTitleHome = foundTitle
+            if (nextPrayerCountdownHome != formatted) nextPrayerCountdownHome = formatted
+            delay(1000L)
+        }
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+        shape = RoundedCornerShape(18.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .glassCard(cornerSize = 18.dp, borderWidth = 1.dp, glassAlpha = 0.95f, hasSheen = false)
+            .clickable { onNavigateToSalah?.invoke() },
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(Color(0xFF0C2D3E), CircleShape)
+                        .border(1.dp, Color(0xFF38BDF8).copy(alpha = 0.42f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Bedtime,
+                        contentDescription = "Next Prayer",
+                        tint = Color(0xFF38BDF8),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Column {
+                    Text(
+                        text = if (isBn) "পরবর্তী: $nextPrayerTitleHome" else "Next: $nextPrayerTitleHome",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = if (isBn) "আজকের সালাত $completedSalahsCount/5" else "Today's Salah $completedSalahsCount/5",
+                        fontSize = 11.5.sp,
+                        color = Color.White.copy(alpha = 0.65f)
+                    )
+                }
+            }
+
+            Text(
+                text = nextPrayerCountdownHome,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF38BDF8),
+                letterSpacing = 0.5.sp
+            )
+        }
+    }
+}
+
 @Composable
 fun LiveStreakTimerRow(
     viewModel: PurityTrackerViewModel,
@@ -8945,7 +9371,9 @@ fun HomeScreen(
     val bestRecord by viewModel.bestRecord.collectAsStateWithLifecycle()
     
     val recordDays = maxOf(days, bestRecord?.durationDays ?: 0)
-    val currentBadge = dynamicBadges.lastOrNull { days >= it.requiredDays } ?: dynamicBadges.firstOrNull() ?: CustomBadge("", "None", 0, "None")
+    val currentBadge = remember(dynamicBadges, days) {
+        dynamicBadges.lastOrNull { days >= it.requiredDays } ?: dynamicBadges.firstOrNull() ?: CustomBadge("", "None", 0, "None")
+    }
 
     // Sync streak only when days or badge changes
     LaunchedEffect(days, currentBadge.name, currentBadge.imageUrl) {
@@ -8972,7 +9400,9 @@ fun HomeScreen(
         )
     }
 
-    val nextBadge = dynamicBadges.firstOrNull { days < it.requiredDays }
+    val nextBadge = remember(dynamicBadges, days) {
+        dynamicBadges.firstOrNull { days < it.requiredDays }
+    }
 
     val nextDaysReq = nextBadge?.requiredDays ?: 365
     val currDaysReq = currentBadge.requiredDays
@@ -9231,18 +9661,26 @@ fun HomeScreen(
         Spacer(modifier = Modifier.height(10.dp))
 
         // Main CURRENT BADGE Hero Card (Auto-cropped full circle badge fill)
-        val unlockedBadgesCount = dynamicBadges.count { days >= it.requiredDays }.coerceAtLeast(1)
-        val totalBadgesCount = dynamicBadges.size.coerceAtLeast(10)
-        val currentIdx = dynamicBadges.indexOfFirst { it.id == currentBadge.id }.let { if (it == -1) 0 else it }
-        val leftPreviewBadge = if (currentIdx == 0) {
-            dynamicBadges.getOrNull(1) ?: CustomBadge("1", "Novice", 3, "")
-        } else {
-            dynamicBadges.getOrNull(currentIdx - 1) ?: CustomBadge("0", "Clown", 0, "")
+        val unlockedBadgesCount = remember(dynamicBadges, days) {
+            dynamicBadges.count { days >= it.requiredDays }.coerceAtLeast(1)
         }
-        val rightPreviewBadge = if (currentIdx == 0) {
-            dynamicBadges.getOrNull(2) ?: CustomBadge("2", "New Warrior", 7, "")
-        } else {
-            nextBadge ?: dynamicBadges.lastOrNull() ?: CustomBadge("9", "Giga Chad", 365, "")
+        val totalBadgesCount = dynamicBadges.size.coerceAtLeast(10)
+        val currentIdx = remember(dynamicBadges, currentBadge.id) {
+            dynamicBadges.indexOfFirst { it.id == currentBadge.id }.let { if (it == -1) 0 else it }
+        }
+        val leftPreviewBadge = remember(dynamicBadges, currentIdx) {
+            if (currentIdx == 0) {
+                dynamicBadges.getOrNull(1) ?: CustomBadge("1", "Novice", 3, "")
+            } else {
+                dynamicBadges.getOrNull(currentIdx - 1) ?: CustomBadge("0", "Clown", 0, "")
+            }
+        }
+        val rightPreviewBadge = remember(dynamicBadges, currentIdx, nextBadge) {
+            if (currentIdx == 0) {
+                dynamicBadges.getOrNull(2) ?: CustomBadge("2", "New Warrior", 7, "")
+            } else {
+                nextBadge ?: dynamicBadges.lastOrNull() ?: CustomBadge("9", "Giga Chad", 365, "")
+            }
         }
         var showMoreMenu by remember { mutableStateOf(false) }
 
@@ -9348,136 +9786,12 @@ fun HomeScreen(
                         )
                     }
 
-                    // Center Golden Glowing Active Badge Circle with Smooth Breathing, Floating & Rotating Aura Animation
-                    val badgeInfiniteTransition = rememberInfiniteTransition(label = "hero_badge_anim")
-                    val badgePulseScale by badgeInfiniteTransition.animateFloat(
-                        initialValue = 1.0f,
-                        targetValue = 1.055f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 2000, easing = androidx.compose.animation.core.FastOutSlowInEasing),
-                            repeatMode = RepeatMode.Reverse
-                        ),
-                        label = "badge_pulse_scale"
+                    // Center Golden Glowing Active Badge Circle (Isolated scope with graphicsLayer/drawBehind for 0-recomposition 120Hz animation)
+                    HeroAnimatedBadgeCircle(
+                        currentBadge = currentBadge,
+                        progress = progress,
+                        onClick = { showBadgesMenu = true }
                     )
-                    val badgeFloatOffsetY by badgeInfiniteTransition.animateFloat(
-                        initialValue = -2.5f,
-                        targetValue = 2.5f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 2200, easing = androidx.compose.animation.core.FastOutSlowInEasing),
-                            repeatMode = RepeatMode.Reverse
-                        ),
-                        label = "badge_float_y"
-                    )
-                    val haloGlowAlpha by badgeInfiniteTransition.animateFloat(
-                        initialValue = 0.22f,
-                        targetValue = 0.52f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 1800, easing = androidx.compose.animation.core.FastOutSlowInEasing),
-                            repeatMode = RepeatMode.Reverse
-                        ),
-                        label = "halo_glow_alpha"
-                    )
-                    val ringRotationDeg by badgeInfiniteTransition.animateFloat(
-                        initialValue = 0f,
-                        targetValue = 360f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 5500, easing = androidx.compose.animation.core.LinearEasing),
-                            repeatMode = RepeatMode.Restart
-                        ),
-                        label = "ring_rotation_deg"
-                    )
-
-                    Box(
-                        modifier = Modifier
-                            .size(112.dp)
-                            .offset(y = badgeFloatOffsetY.dp)
-                            .clickable { showBadgesMenu = true },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        // Soft ambient pulsing golden halo
-                        Box(
-                            modifier = Modifier
-                                .size(110.dp)
-                                .graphicsLayer(
-                                    scaleX = badgePulseScale * 1.04f,
-                                    scaleY = badgePulseScale * 1.04f
-                                )
-                                .background(
-                                    brush = Brush.radialGradient(
-                                        colors = listOf(
-                                            Color(0xFFF59E0B).copy(alpha = haloGlowAlpha),
-                                            Color(0xFFFBBF24).copy(alpha = haloGlowAlpha * 0.35f),
-                                            Color.Transparent
-                                        )
-                                    ),
-                                    shape = CircleShape
-                                )
-                        )
-                        // Rotating luminous golden sweep ring
-                        androidx.compose.foundation.Canvas(
-                            modifier = Modifier
-                                .size(102.dp)
-                                .graphicsLayer(rotationZ = ringRotationDeg)
-                        ) {
-                            drawCircle(
-                                brush = Brush.sweepGradient(
-                                    colors = listOf(
-                                        Color.Transparent,
-                                        Color(0xFFFBBF24).copy(alpha = 0.25f),
-                                        Color(0xFFFDE047),
-                                        Color(0xFFF59E0B),
-                                        Color.Transparent
-                                    )
-                                ),
-                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3.dp.toPx())
-                            )
-                        }
-                        // Outer progress arc ring
-                        CircularProgressIndicator(
-                            progress = { progress.coerceIn(0.08f, 1f) },
-                            modifier = Modifier.size(102.dp),
-                            color = Color(0xFFFBBF24),
-                            trackColor = Color.White.copy(alpha = 0.10f),
-                            strokeWidth = 3.5.dp,
-                            strokeCap = StrokeCap.Round
-                        )
-                        // Inner Round Circle filled 100% by the auto-cropped badge image with breathing pulse
-                        Box(
-                            modifier = Modifier
-                                .size(86.dp)
-                                .graphicsLayer(
-                                    scaleX = badgePulseScale,
-                                    scaleY = badgePulseScale
-                                )
-                                .clip(CircleShape)
-                                .background(
-                                    brush = Brush.radialGradient(
-                                        colors = listOf(
-                                            Color(0xFFFDE047),
-                                            Color(0xFFF59E0B),
-                                            Color(0xFFD97706)
-                                        )
-                                    ),
-                                    shape = CircleShape
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            BadgeImage(
-                                imageUrl = currentBadge.imageUrl,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .clip(CircleShape)
-                                    .graphicsLayer(scaleX = 1.14f, scaleY = 1.14f),
-                                fallbackName = currentBadge.name,
-                                contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .border(2.dp, Color(0xFFFBBF24), CircleShape)
-                            )
-                        }
-                    }
 
                     // Right Side Circular Badge Preview
                     val isRightUnlocked = days >= rightPreviewBadge.requiredDays
@@ -9693,126 +10007,12 @@ fun HomeScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Next Prayer Compact Glass Bar (Matching Reference Screenshot 1: "Next: Dhuhr / Today's Salah 0/5" + Live Countdown)
-        val todaySalahsHome by salahViewModel.todaySalahs.collectAsState()
-        val salahTimingsHome by salahViewModel.todayTimings.collectAsState()
-        val completedSalahsCount = todaySalahsHome.count { it }
-        var nextPrayerTitleHome by remember { mutableStateOf("Dhuhr") }
-        var nextPrayerCountdownHome by remember { mutableStateOf("00:00:00") }
-
-        LaunchedEffect(salahTimingsHome) {
-            val sdf = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
-            while (true) {
-                if (salahTimingsHome.isNotEmpty()) {
-                    val now = java.util.Calendar.getInstance()
-                    val nowStr = String.format(
-                        java.util.Locale.US,
-                        "%02d:%02d",
-                        now.get(java.util.Calendar.HOUR_OF_DAY),
-                        now.get(java.util.Calendar.MINUTE)
-                    )
-                    val order = listOf("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")
-                    var foundNext = false
-                    for (p in order) {
-                        val tStr = salahTimingsHome[p]?.replace(Regex("\\s\\(.*\\)"), "")
-                        if (tStr != null && nowStr < tStr) {
-                            val d = try { sdf.parse(tStr) } catch (e: Exception) { null }
-                            if (d != null) {
-                                val pCal = java.util.Calendar.getInstance()
-                                pCal.time = d
-                                pCal.set(java.util.Calendar.YEAR, now.get(java.util.Calendar.YEAR))
-                                pCal.set(java.util.Calendar.MONTH, now.get(java.util.Calendar.MONTH))
-                                pCal.set(java.util.Calendar.DAY_OF_YEAR, now.get(java.util.Calendar.DAY_OF_YEAR))
-                                val diff = (pCal.timeInMillis - now.timeInMillis).coerceAtLeast(0L)
-                                val h = diff / (1000 * 60 * 60)
-                                val m = (diff / (1000 * 60)) % 60
-                                val s = (diff / 1000) % 60
-                                nextPrayerCountdownHome = String.format(java.util.Locale.US, "%02d:%02d:%02d", h, m, s)
-                                nextPrayerTitleHome = p
-                                foundNext = true
-                                break
-                            }
-                        }
-                    }
-                    if (!foundNext) {
-                        val tStr = salahTimingsHome["Fajr"]?.replace(Regex("\\s\\(.*\\)"), "")
-                        val d = if (tStr != null) try { sdf.parse(tStr) } catch (e: Exception) { null } else null
-                        if (d != null) {
-                            val pCal = java.util.Calendar.getInstance()
-                            pCal.add(java.util.Calendar.DAY_OF_YEAR, 1)
-                            val c2 = java.util.Calendar.getInstance().apply { time = d }
-                            pCal.set(java.util.Calendar.HOUR_OF_DAY, c2.get(java.util.Calendar.HOUR_OF_DAY))
-                            pCal.set(java.util.Calendar.MINUTE, c2.get(java.util.Calendar.MINUTE))
-                            pCal.set(java.util.Calendar.SECOND, 0)
-                            val diff = (pCal.timeInMillis - now.timeInMillis).coerceAtLeast(0L)
-                            val h = diff / (1000 * 60 * 60)
-                            val m = (diff / (1000 * 60)) % 60
-                            val s = (diff / 1000) % 60
-                            nextPrayerCountdownHome = String.format(java.util.Locale.US, "%02d:%02d:%02d", h, m, s)
-                            nextPrayerTitleHome = "Fajr"
-                        }
-                    }
-                }
-                kotlinx.coroutines.delay(1000)
-            }
-        }
-
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color.Transparent),
-            shape = RoundedCornerShape(18.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .glassCard(cornerSize = 18.dp, borderWidth = 1.dp, glassAlpha = 0.95f, hasSheen = false)
-                .clickable { onNavigateToSalah?.invoke() },
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .background(Color(0xFF0C2D3E), CircleShape)
-                            .border(1.dp, Color(0xFF38BDF8).copy(alpha = 0.42f), CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Bedtime,
-                            contentDescription = "Next Prayer",
-                            tint = Color(0xFF38BDF8),
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = if (isBn) "পরবর্তী: $nextPrayerTitleHome" else "Next: $nextPrayerTitleHome",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                        Text(
-                            text = if (isBn) "আজকের সালাত $completedSalahsCount/5" else "Today's Salah $completedSalahsCount/5",
-                            fontSize = 11.5.sp,
-                            color = Color.White.copy(alpha = 0.65f)
-                        )
-                    }
-                }
-
-                Text(
-                    text = nextPrayerCountdownHome,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF38BDF8),
-                    letterSpacing = 0.5.sp
-                )
-            }
-        }
+        // Next Prayer Compact Glass Bar (Isolated 1-second recomposition scope so HomeScreen never recomposes every second)
+        HomeNextPrayerCard(
+            salahViewModel = salahViewModel,
+            isBn = isBn,
+            onNavigateToSalah = onNavigateToSalah
+        )
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -9868,6 +10068,7 @@ fun HomeScreen(
         val subtextColor = if (isLightMode) Color(0xFF475569) else Color(0xFFCBD5E1)
 
         var partnerEmailHome by remember { mutableStateOf(BlockerManager.getPartnerEmail(context)) }
+        var isPartnerLockedHome by remember { mutableStateOf(partnerEmailHome.isNotBlank() && BlockerManager.hasValidPartnerEmail(context)) }
         var showHomeTurnOffDialog by remember { mutableStateOf(false) }
         var isSendingHomeTurnOff by remember { mutableStateOf(false) }
         var showHomeChangePartnerDialog by remember { mutableStateOf(false) }
@@ -9876,49 +10077,75 @@ fun HomeScreen(
         var homePartnerEmailInput by remember { mutableStateOf("") }
         var isSendingHomePinRequest by remember { mutableStateOf(false) }
 
-        // Persistent continuous UI-thread guard loop (v1.3.6: partner-only PIN)
+        // Background IO-thread guard status monitor (v1.3.6: partner-only PIN; zero main-thread Binder IPC)
         LaunchedEffect(Unit) {
-            while (true) {
+            withContext(Dispatchers.IO) {
                 try {
                     SettingsGuardWatchdogService.startIfInForeground(context)
                 } catch (e: Exception) {}
-                hasPin = LockManager.hasPin(context)
-                partnerEmailHome = BlockerManager.getPartnerEmail(context)
-                isBlockerActive = BlockerManager.isAdultBlockerEnabled(context)
-                val aliveNow = AntiUninstallManager.isAccessibilityServiceAlive(context)
-                val deadNow = AntiUninstallManager.isAccessibilityDeadButEnabled(context)
-                isAccessibilityEnabled = aliveNow
-                isAccessibilityServiceRunning = aliveNow
-                isAccessibilityDeadButEnabled = deadNow
-                isDeviceAdminEnabled = AntiUninstallManager.isDeviceAdminActive(context)
-                isBatteryExempt = AntiUninstallManager.isBatteryOptimizationIgnored(context)
-                isOemAutoStartVisited = AntiUninstallManager.isOemAutoStartVisited(context)
-                isRecentsLockConfirmed = AntiUninstallManager.isRecentsLockConfirmed(context)
-                if (isBatteryExempt) {
+            }
+            BlockerManager.ensurePartnerApprovalListener(context) { status ->
+                if (status == "approved") {
+                    isBlockerActive = false
+                }
+            }
+            BlockerManager.ensurePartnerChangeApprovalListener(context) { status ->
+                if (status == "approved") {
+                    partnerEmailHome = ""
+                    isPartnerLockedHome = false
+                }
+            }
+            BlockerManager.ensurePinResetApprovalListener(context) { status ->
+                if (status == "approved") {
+                    BlockerManager.consumePartnerPinResetNotice(context)
+                    hasPin = LockManager.hasPin(context)
+                    android.widget.Toast.makeText(
+                        context,
+                        "Your PIN was reset by your partner",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+            while (true) {
+                val snapshot = withContext(Dispatchers.IO) {
+                    val pPin = LockManager.hasPin(context)
+                    val pEmail = BlockerManager.getPartnerEmail(context)
+                    val pLocked = pEmail.isNotBlank() && BlockerManager.hasValidPartnerEmail(context)
+                    val pBlocker = BlockerManager.isAdultBlockerEnabled(context)
+                    val aliveNow = AntiUninstallManager.isAccessibilityServiceAlive(context)
+                    val deadNow = AntiUninstallManager.isAccessibilityDeadButEnabled(context)
+                    val devAdmin = AntiUninstallManager.isDeviceAdminActive(context)
+                    val batExempt = AntiUninstallManager.isBatteryOptimizationIgnored(context)
+                    val oemVisited = AntiUninstallManager.isOemAutoStartVisited(context)
+                    val recentsLocked = AntiUninstallManager.isRecentsLockConfirmed(context)
+                    HomeGuardSnapshot(
+                        hasPin = pPin,
+                        partnerEmail = pEmail,
+                        isPartnerLocked = pLocked,
+                        isBlockerActive = pBlocker,
+                        isAccAlive = aliveNow,
+                        isAccDead = deadNow,
+                        isDeviceAdmin = devAdmin,
+                        isBatteryExempt = batExempt,
+                        isOemAutoStartVisited = oemVisited,
+                        isRecentsLockConfirmed = recentsLocked
+                    )
+                }
+                if (hasPin != snapshot.hasPin) hasPin = snapshot.hasPin
+                if (partnerEmailHome != snapshot.partnerEmail) partnerEmailHome = snapshot.partnerEmail
+                if (isPartnerLockedHome != snapshot.isPartnerLocked) isPartnerLockedHome = snapshot.isPartnerLocked
+                if (isBlockerActive != snapshot.isBlockerActive) isBlockerActive = snapshot.isBlockerActive
+                if (isAccessibilityEnabled != snapshot.isAccAlive) isAccessibilityEnabled = snapshot.isAccAlive
+                if (isAccessibilityServiceRunning != snapshot.isAccAlive) isAccessibilityServiceRunning = snapshot.isAccAlive
+                if (isAccessibilityDeadButEnabled != snapshot.isAccDead) isAccessibilityDeadButEnabled = snapshot.isAccDead
+                if (isDeviceAdminEnabled != snapshot.isDeviceAdmin) isDeviceAdminEnabled = snapshot.isDeviceAdmin
+                if (isBatteryExempt != snapshot.isBatteryExempt) isBatteryExempt = snapshot.isBatteryExempt
+                if (isOemAutoStartVisited != snapshot.isOemAutoStartVisited) isOemAutoStartVisited = snapshot.isOemAutoStartVisited
+                if (isRecentsLockConfirmed != snapshot.isRecentsLockConfirmed) isRecentsLockConfirmed = snapshot.isRecentsLockConfirmed
+                if (snapshot.isBatteryExempt && showBatteryExemptionDialog) {
                     showBatteryExemptionDialog = false
                 }
-                BlockerManager.ensurePartnerApprovalListener(context) { status ->
-                    if (status == "approved") {
-                        isBlockerActive = false
-                    }
-                }
-                BlockerManager.ensurePartnerChangeApprovalListener(context) { status ->
-                    if (status == "approved") {
-                        partnerEmailHome = ""
-                    }
-                }
-                BlockerManager.ensurePinResetApprovalListener(context) { status ->
-                    if (status == "approved") {
-                        BlockerManager.consumePartnerPinResetNotice(context)
-                        hasPin = LockManager.hasPin(context)
-                        android.widget.Toast.makeText(
-                            context,
-                            "Your PIN was reset by your partner",
-                            android.widget.Toast.LENGTH_LONG
-                        ).show()
-                    }
-                }
-                kotlinx.coroutines.delay(1000) // check every 1 second
+                kotlinx.coroutines.delay(2500L)
             }
         }
 
@@ -10150,6 +10377,7 @@ fun HomeScreen(
                                 android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_LONG).show()
                             } else {
                                 partnerEmailHome = BlockerManager.getPartnerEmail(context)
+                                isPartnerLockedHome = partnerEmailHome.isNotBlank() && BlockerManager.hasValidPartnerEmail(context)
                                 homePartnerEmailInput = ""
                                 showHomeSetPartnerDialog = false
                                 android.widget.Toast.makeText(
@@ -10170,7 +10398,6 @@ fun HomeScreen(
 
         val isGuardConnected = isAccessibilityEnabled && isAccessibilityServiceRunning
         val isBatteryIgnored = isBatteryExempt
-        val isPartnerLockedHome = partnerEmailHome.isNotBlank() && BlockerManager.hasValidPartnerEmail(context)
 
         // Single Daily Controls Card (4 compact rows: 1. App PIN, 2. Accessibility, 3. Accountability Partner Email, 4. Block adult content + "See full Blocker page →")
         Card(
