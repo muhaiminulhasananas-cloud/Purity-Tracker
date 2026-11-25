@@ -153,6 +153,13 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         private const val TAG = "AiViewModel"
         private const val PRIMARY_CHAT_MODEL = "gemini-3.5-flash-lite"
         private const val FALLBACK_CHAT_MODEL = "gemini-3.5-flash"
+
+        internal fun isMissingApiKey(apiKey: String?): Boolean {
+            val trimmed = apiKey?.trim().orEmpty()
+            return trimmed.isEmpty() ||
+                trimmed.equals("MY_GEMINI_API_KEY", ignoreCase = true) ||
+                trimmed.equals("<redacted>", ignoreCase = true)
+        }
     }
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(
@@ -193,8 +200,9 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         _ttsError.value = null
 
         val apiKey = BuildConfig.GEMINI_API_KEY
-        if (apiKey == "MY_GEMINI_API_KEY" || apiKey.isBlank()) {
-            _ttsError.value = "Gemini API key is missing. Set GEMINI_API_KEY in AI Studio's Secrets panel to enable Noor's Pegasus voice."
+        if (isMissingApiKey(apiKey)) {
+            Log.e(TAG, "Noor voice unavailable: GEMINI_API_KEY is missing or placeholder in BuildConfig.")
+            _ttsError.value = GeminiErrorFormatter.politeUnavailableMessage()
             return
         }
 
@@ -213,8 +221,8 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.e(TAG, "Noor Pegasus TTS failed", e)
-                _ttsError.value = "Voice error: ${GeminiErrorFormatter.format(e, apiKey)}"
+                Log.e(TAG, "Noor Pegasus TTS failed: ${GeminiErrorFormatter.formatForLog(e, apiKey)}", e)
+                _ttsError.value = GeminiErrorFormatter.politeUnavailableMessage()
             } finally {
                 if (_loadingAudioMessageId.value == messageId) {
                     _loadingAudioMessageId.value = null
@@ -287,10 +295,11 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             val apiKey = BuildConfig.GEMINI_API_KEY
-            if (apiKey == "MY_GEMINI_API_KEY" || apiKey.isBlank()) {
+            if (isMissingApiKey(apiKey)) {
+                Log.e(TAG, "Noor chat unavailable: GEMINI_API_KEY is missing or placeholder in BuildConfig.")
                 _isLoading.value = false
                 _messages.value = _messages.value + ChatMessage(
-                    text = LanguageStore.get("ai_missing_key"),
+                    text = GeminiErrorFormatter.politeUnavailableMessage(),
                     isUser = false,
                     isError = true
                 )
@@ -398,9 +407,10 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
 
                 withContext(Dispatchers.Main) {
                     if (accumulatedText.isBlank()) {
+                        Log.e(TAG, "Noor chat returned an empty response.")
                         updateStreamingMessage(
                             aiMessageId,
-                            "Noor AI returned an empty response. Please try rephrasing your question.",
+                            GeminiErrorFormatter.politeUnavailableMessage(),
                             isStreaming = false,
                             isError = true
                         )
@@ -412,11 +422,10 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.e(TAG, "Noor AI chat request failed", e)
+                Log.e(TAG, "Noor AI chat request failed: ${GeminiErrorFormatter.formatForLog(e, apiKey)}", e)
                 _isLoading.value = false
-                val clearError = GeminiErrorFormatter.format(e, apiKey)
                 _messages.value = _messages.value + ChatMessage(
-                    text = clearError,
+                    text = GeminiErrorFormatter.politeUnavailableMessage(),
                     isUser = false,
                     isError = true
                 )

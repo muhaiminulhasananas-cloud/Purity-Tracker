@@ -374,47 +374,73 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `GeminiErrorFormatter reports API key, quota, server, timeout, and network errors accurately without leaking key`() {
+  fun `GeminiErrorFormatter returns polite localized apology for users and logs redacted diagnostics only`() {
     val secretKey = "AQ.FAKE_TEST_KEY_12345"
+    val previousLang = LanguageStore.currentLanguage.value
+    try {
+      // Missing API key validation catches blank, MY_GEMINI_API_KEY, and <redacted>
+      assertEquals(true, AiViewModel.isMissingApiKey(null))
+      assertEquals(true, AiViewModel.isMissingApiKey(""))
+      assertEquals(true, AiViewModel.isMissingApiKey("   "))
+      assertEquals(true, AiViewModel.isMissingApiKey("MY_GEMINI_API_KEY"))
+      assertEquals(true, AiViewModel.isMissingApiKey("my_gemini_api_key"))
+      assertEquals(true, AiViewModel.isMissingApiKey("<redacted>"))
+      assertEquals(true, AiViewModel.isMissingApiKey(" <REDACTED> "))
+      assertEquals(false, AiViewModel.isMissingApiKey(secretKey))
 
-    val invalidKeyMsg = GeminiErrorFormatter.format(
-      GeminiApiException(400, "INVALID_ARGUMENT", "API key not valid. Key $secretKey failed."),
-      secretKey
-    )
-    assertEquals(true, invalidKeyMsg.contains("API key", ignoreCase = true))
-    assertEquals(false, invalidKeyMsg.contains(secretKey))
-    assertEquals(false, invalidKeyMsg.contains("internet connection", ignoreCase = true))
+      val forbiddenTerms = listOf(
+        "Gemini", "API key", "AI Studio", "Secrets", "HTTP", "quota", "billing", "SSL", "Voice error", secretKey
+      )
 
-    val revokedKeyMsg = GeminiErrorFormatter.format(
-      GeminiApiException(403, "PERMISSION_DENIED", "API key was revoked"),
-      secretKey
-    )
-    assertEquals(true, revokedKeyMsg.contains("rejected or revoked", ignoreCase = true))
+      val testErrors = listOf(
+        GeminiApiException(400, "INVALID_ARGUMENT", "API key not valid. Key $secretKey failed."),
+        GeminiApiException(403, "PERMISSION_DENIED", "API key was revoked"),
+        GeminiApiException(429, "RESOURCE_EXHAUSTED", "Quota exceeded for quota metric"),
+        GeminiApiException(503, "UNAVAILABLE", "High demand"),
+        java.net.SocketTimeoutException("Read timed out"),
+        java.net.UnknownHostException("Unable to resolve host")
+      )
 
-    val quotaMsg = GeminiErrorFormatter.format(
-      GeminiApiException(429, "RESOURCE_EXHAUSTED", "Quota exceeded for quota metric"),
-      secretKey
-    )
-    assertEquals(true, quotaMsg.contains("quota", ignoreCase = true))
-    assertEquals(false, quotaMsg.contains("internet connection", ignoreCase = true))
+      LanguageStore.currentLanguage.value = "bn"
+      for (err in testErrors) {
+        val userMsg = GeminiErrorFormatter.format(err, secretKey)
+        assertEquals(
+          "দুঃখিত, এই মুহূর্তে নূরের সাথে কথা বলা যাচ্ছে না। একটু পরে আবার চেষ্টা করো, ইনশাআল্লাহ।",
+          userMsg
+        )
+        for (term in forbiddenTerms) {
+          assertEquals(false, userMsg.contains(term, ignoreCase = true))
+        }
+      }
 
-    val busyMsg = GeminiErrorFormatter.format(
-      GeminiApiException(503, "UNAVAILABLE", "High demand"),
-      secretKey
-    )
-    assertEquals(true, busyMsg.contains("temporarily busy", ignoreCase = true))
+      LanguageStore.currentLanguage.value = "en"
+      for (err in testErrors) {
+        val userMsg = GeminiErrorFormatter.format(err, secretKey)
+        assertEquals(
+          "Sorry, I can't talk right now. Please try again in a little while, insha'Allah.",
+          userMsg
+        )
+        for (term in forbiddenTerms) {
+          assertEquals(false, userMsg.contains(term, ignoreCase = true))
+        }
+      }
 
-    val timeoutMsg = GeminiErrorFormatter.format(
-      java.net.SocketTimeoutException("Read timed out"),
-      secretKey
-    )
-    assertEquals(true, timeoutMsg.contains("timed out", ignoreCase = true))
+      // Logcat-only formatter preserves technical diagnostics while redacting secret key
+      val logInvalidKey = GeminiErrorFormatter.formatForLog(
+        GeminiApiException(400, "INVALID_ARGUMENT", "API key not valid. Key $secretKey failed."),
+        secretKey
+      )
+      assertEquals(true, logInvalidKey.contains("HTTP 400"))
+      assertEquals(false, logInvalidKey.contains(secretKey))
 
-    val offlineMsg = GeminiErrorFormatter.format(
-      java.net.UnknownHostException("Unable to resolve host"),
-      secretKey
-    )
-    assertEquals(true, offlineMsg.contains("internet connection", ignoreCase = true))
+      val logQuota = GeminiErrorFormatter.formatForLog(
+        GeminiApiException(429, "RESOURCE_EXHAUSTED", "Quota exceeded"),
+        secretKey
+      )
+      assertEquals(true, logQuota.contains("HTTP 429"))
+    } finally {
+      LanguageStore.currentLanguage.value = previousLang
+    }
   }
 
   @Test

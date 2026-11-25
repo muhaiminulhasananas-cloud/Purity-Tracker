@@ -75,10 +75,14 @@ class GeminiApiException(
 ) : Exception(apiMessage ?: "Gemini API error (HTTP $httpCode)")
 
 /**
- * Shared diagnostic error formatter for both Noor AI chat and Noor Gemini TTS.
- * Never masks API key, quota, model, or server errors behind a generic "Check your internet connection" message.
+ * Shared error formatter for both Noor AI chat and Noor Pegasus voice.
+ * Full redacted diagnostics are logged strictly to Logcat via [formatForLog];
+ * user-facing UI always receives a polite, non-technical apology in the user's selected language.
  */
 object GeminiErrorFormatter {
+    private const val LOG_TAG = "NoorAI"
+
+    fun politeUnavailableMessage(): String = LanguageStore.get("ai_missing_key")
 
     fun parseGoogleErrorBody(rawBody: String?): Pair<String?, String?> {
         if (rawBody.isNullOrBlank()) return null to null
@@ -93,7 +97,24 @@ object GeminiErrorFormatter {
         }
     }
 
+    /**
+     * Logs the redacted technical diagnostic to Logcat and returns a polite, non-technical message
+     * for display to the user.
+     */
     fun format(throwable: Throwable, apiKeyToRedact: String = ""): String {
+        val diagnostic = formatForLog(throwable, apiKeyToRedact)
+        try {
+            Log.e(LOG_TAG, diagnostic, throwable)
+        } catch (_: Throwable) {
+            // Safe fallback in pure JVM unit tests where android.util.Log is stubbed.
+        }
+        return politeUnavailableMessage()
+    }
+
+    /**
+     * Formats a detailed, key-redacted diagnostic message intended strictly for Logcat debugging.
+     */
+    fun formatForLog(throwable: Throwable, apiKeyToRedact: String = ""): String {
         val rawCode: Int
         val apiStatus: String?
         val apiMsg: String?
@@ -116,28 +137,28 @@ object GeminiErrorFormatter {
                 apiMsg = parsed.second
             }
             is SocketTimeoutException -> {
-                return "Request to Noor AI timed out. Please try again."
+                return "Request to Noor AI timed out."
             }
             is UnknownHostException, is ConnectException, is NoRouteToHostException -> {
-                return "Unable to reach Gemini servers. Please check your internet connection or VPN/DNS settings."
+                return "Unable to reach Gemini servers (DNS/connect error)."
             }
             is SSLException -> {
-                return "Secure connection (SSL) to Gemini failed. Check your device date/time or network."
+                return "SSL handshake failed while contacting Gemini."
             }
             is IOException -> {
                 val msg = sanitize(throwable.localizedMessage, apiKeyToRedact)
                 return if (msg.isNotBlank()) {
-                    "Network error while contacting Noor AI: $msg"
+                    "Network IO error while contacting Noor AI: $msg"
                 } else {
-                    "Network error while contacting Noor AI. Please try again."
+                    "Network IO error while contacting Noor AI."
                 }
             }
             else -> {
                 val msg = sanitize(throwable.localizedMessage, apiKeyToRedact)
                 return if (msg.isNotBlank()) {
-                    "Noor AI error: $msg"
+                    "Noor AI unexpected error: $msg"
                 } else {
-                    "Something went wrong while getting a reply from Noor AI. Please try again."
+                    "Noor AI unexpected error."
                 }
             }
         }
@@ -152,26 +173,26 @@ object GeminiErrorFormatter {
                 combined.contains("key expired") ||
                 combined.contains("key invalid")
             ) -> {
-                "Gemini API key is invalid or expired (HTTP 400). Please update GEMINI_API_KEY in AI Studio's Secrets panel."
+                "Gemini API key is invalid or expired (HTTP 400): $cleanMsg"
             }
             rawCode == 401 || rawCode == 403 -> {
                 if (combined.contains("quota") || combined.contains("billing")) {
-                    "Gemini API quota or billing issue (HTTP $rawCode): ${cleanMsg.ifBlank { "Please check your Gemini API billing/quota." }}"
+                    "Gemini API quota or billing issue (HTTP $rawCode): ${cleanMsg.ifBlank { "Check billing/quota." }}"
                 } else {
-                    "Gemini API key was rejected or revoked (HTTP $rawCode). Please check GEMINI_API_KEY permissions in AI Studio's Secrets panel."
+                    "Gemini API key was rejected or revoked (HTTP $rawCode): ${cleanMsg.ifBlank { "Check key permissions." }}"
                 }
             }
             rawCode == 429 || combined.contains("resource_exhausted") || combined.contains("quota") || combined.contains("rate limit") -> {
-                "Gemini API quota or rate limit reached (HTTP $rawCode). Please wait a moment or check your Gemini API quota."
+                "Gemini API quota or rate limit reached (HTTP $rawCode): $cleanMsg"
             }
             rawCode == 404 -> {
-                "Gemini model endpoint not found (HTTP 404): ${cleanMsg.ifBlank { "The requested Gemini model is unavailable." }}"
+                "Gemini model endpoint not found (HTTP 404): ${cleanMsg.ifBlank { "Model unavailable." }}"
             }
             rawCode == 500 || rawCode == 502 || rawCode == 503 || rawCode == 504 -> {
-                "Gemini servers are temporarily busy (HTTP $rawCode). Please try again in a few seconds."
+                "Gemini servers temporarily busy (HTTP $rawCode): $cleanMsg"
             }
             rawCode == 400 -> {
-                "Gemini API rejected the request (HTTP 400): ${cleanMsg.ifBlank { "Invalid request parameters." }}"
+                "Gemini API rejected request (HTTP 400): ${cleanMsg.ifBlank { "Invalid request parameters." }}"
             }
             else -> {
                 "Gemini API error (HTTP $rawCode): ${cleanMsg.ifBlank { "Unexpected server response." }}"
