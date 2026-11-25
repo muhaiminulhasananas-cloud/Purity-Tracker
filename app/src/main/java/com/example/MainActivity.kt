@@ -9080,7 +9080,7 @@ private fun HeroAnimatedBadgeCircle(
 
     Box(
         modifier = Modifier
-            .size(112.dp)
+            .size(126.dp)
             .graphicsLayer {
                 translationY = badgeFloatOffsetYState.value.dp.toPx()
             }
@@ -9090,7 +9090,7 @@ private fun HeroAnimatedBadgeCircle(
         // Soft ambient pulsing golden halo (draw-phase only, 0 recompositions)
         Box(
             modifier = Modifier
-                .size(110.dp)
+                .size(124.dp)
                 .graphicsLayer {
                     val s = badgePulseScaleState.value * 1.04f
                     scaleX = s
@@ -9112,7 +9112,7 @@ private fun HeroAnimatedBadgeCircle(
         // Rotating luminous golden sweep ring (graphicsLayer lambda, 0 recompositions)
         Canvas(
             modifier = Modifier
-                .size(102.dp)
+                .size(115.dp)
                 .graphicsLayer {
                     rotationZ = ringRotationDegState.value
                 }
@@ -9125,7 +9125,7 @@ private fun HeroAnimatedBadgeCircle(
         // Outer progress arc ring
         CircularProgressIndicator(
             progress = { progress.coerceIn(0.08f, 1f) },
-            modifier = Modifier.size(102.dp),
+            modifier = Modifier.size(115.dp),
             color = Color(0xFFFBBF24),
             trackColor = Color.White.copy(alpha = 0.10f),
             strokeWidth = 3.5.dp,
@@ -9134,7 +9134,7 @@ private fun HeroAnimatedBadgeCircle(
         // Inner Round Circle filled 100% by the auto-cropped badge image with breathing pulse
         Box(
             modifier = Modifier
-                .size(86.dp)
+                .size(97.dp)
                 .graphicsLayer {
                     val s = badgePulseScaleState.value
                     scaleX = s
@@ -9735,6 +9735,7 @@ fun HomeScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
                             .weight(1f)
+                            .offset(x = (-6).dp)
                             .clickable { showBadgesMenu = true }
                     ) {
                         Box(
@@ -9799,6 +9800,7 @@ fun HomeScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
                             .weight(1f)
+                            .offset(x = 6.dp)
                             .clickable { showBadgesMenu = true }
                     ) {
                         Box(
