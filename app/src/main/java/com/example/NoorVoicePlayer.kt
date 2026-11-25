@@ -375,10 +375,11 @@ object NoorVoicePlayer {
         requestJson: String,
         apiKey: String
     ): SynthesizedAudio {
-        val url = "$BASE_URL$model:generateContent?key=$apiKey"
+        val url = "$BASE_URL$model:generateContent"
         val body = requestJson.toRequestBody("application/json; charset=utf-8".toMediaType())
         val httpRequest = Request.Builder()
             .url(url)
+            .header("x-goog-api-key", apiKey)
             .post(body)
             .build()
 

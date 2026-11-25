@@ -378,15 +378,31 @@ class ExampleRobolectricTest {
     val secretKey = "AQ.FAKE_TEST_KEY_12345"
     val previousLang = LanguageStore.currentLanguage.value
     try {
-      // Missing API key validation catches blank, MY_GEMINI_API_KEY, and <redacted>
+      // Missing API key validation catches blank, MY_GEMINI_API_KEY, and <redacted> (even quoted/padded)
       assertEquals(true, AiViewModel.isMissingApiKey(null))
       assertEquals(true, AiViewModel.isMissingApiKey(""))
       assertEquals(true, AiViewModel.isMissingApiKey("   "))
       assertEquals(true, AiViewModel.isMissingApiKey("MY_GEMINI_API_KEY"))
+      assertEquals(true, AiViewModel.isMissingApiKey("\"MY_GEMINI_API_KEY\""))
       assertEquals(true, AiViewModel.isMissingApiKey("my_gemini_api_key"))
       assertEquals(true, AiViewModel.isMissingApiKey("<redacted>"))
       assertEquals(true, AiViewModel.isMissingApiKey(" <REDACTED> "))
       assertEquals(false, AiViewModel.isMissingApiKey(secretKey))
+      assertEquals(secretKey, AiViewModel.resolveApiKey(" \"$secretKey\" "))
+
+      // System instruction includes Purity Tracker guide and excludes Adhan
+      val prompt = AiViewModel.SYSTEM_INSTRUCTION_TEXT
+      assertEquals(true, prompt.contains("Purity Tracker"))
+      assertEquals(true, prompt.contains("৳১৪৯"))
+      assertEquals(true, prompt.contains("৳৭৯৯"))
+      assertEquals(true, prompt.contains("৳১,৯৯৯"))
+      assertEquals(true, prompt.contains("bKash"))
+      assertEquals(true, prompt.contains("Nagad"))
+      assertEquals(true, prompt.contains("Rocket"))
+      assertEquals(true, prompt.contains("PIN can NEVER be used to turn off the content blocker"))
+      assertEquals(false, prompt.contains("Adhan", ignoreCase = true))
+      assertEquals(false, prompt.contains("Azan", ignoreCase = true))
+      assertEquals(false, prompt.contains("আজান"))
 
       val forbiddenTerms = listOf(
         "Gemini", "API key", "AI Studio", "Secrets", "HTTP", "quota", "billing", "SSL", "Voice error", secretKey

@@ -25,6 +25,7 @@ import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import retrofit2.http.Body
+import retrofit2.http.Header
 import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -72,7 +73,7 @@ interface GeminiApiService {
     @POST("v1beta/models/{model}:generateContent")
     suspend fun generateContent(
         @Path("model") model: String,
-        @Query("key") apiKey: String,
+        @Header("x-goog-api-key") apiKey: String,
         @Body request: GenerateContentRequest
     ): GenerateContentResponse
 
@@ -81,7 +82,7 @@ interface GeminiApiService {
     suspend fun generateContentStream(
         @Path("model") model: String,
         @Query("alt") alt: String = "sse",
-        @Query("key") apiKey: String,
+        @Header("x-goog-api-key") apiKey: String,
         @Body request: GenerateContentRequest
     ): ResponseBody
 }
@@ -154,11 +155,55 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         private const val PRIMARY_CHAT_MODEL = "gemini-3.5-flash-lite"
         private const val FALLBACK_CHAT_MODEL = "gemini-3.5-flash"
 
+        internal val SYSTEM_INSTRUCTION_TEXT: String = """
+            You are 'Noor AI' (নূর AI) — the built-in Islamic counselor, habit recovery assistant, and spiritual companion inside the Purity Tracker app.
+
+            PURITY TRACKER COMPLETE FEATURE GUIDE (KNOW THIS THOROUGHLY):
+            1. Streak & Badges (স্ট্রিক আর ব্যাজ):
+               - Daily recovery streak tracker that counts clean days continuously.
+               - 10 milestone badges to unlock as your streak grows (0, 1, 3, 7, 15, 30, 45, 60, 120, and 365 days — celebrating key recovery checkpoints like 3 days, 7 days, 14/15 days, 21 days, 30 days, 45 days, 60 days, 120 days, and 365 days).
+            2. Salah / Prayer Tracking (নামাজ/সালাহ ট্র্যাকিং):
+               - Daily 5-waqt Salah checklist (Fajr, Dhuhr, Asr, Maghrib, Isha) and past 7-day Salah record so users stay consistent in prayer.
+            3. Content Blocker & Accountability Protection (কনটেন্ট ব্লকার):
+               - Blocks adult and harmful content on the phone.
+               - To turn off or disable the blocker, Accountability Partner (অভিভাবক) email approval is strictly required.
+               - The App PIN is set ONLY by the accountability partner — the user can never set or create the PIN himself.
+               - The PIN can NEVER be used to turn off the content blocker.
+            4. Trigger & Mood Log + Protection Chart (ট্রিগার আর মুড লগ, সুরক্ষার চার্ট):
+               - Lets users log their triggers and moods to discover what puts them at risk.
+               - Shows a protection chart so users can see how protected they are and track their safety patterns.
+            5. Noor AI Counseling (নূর AI কাউন্সেলিং):
+               - Built right inside Purity Tracker for direct Islamic & recovery guidance (limited free daily messages, and unlimited in Premium).
+            6. Premium Membership (প্রিমিয়াম):
+               - Monthly (মাসিক): ৳১৪৯ (149 BDT)
+               - Yearly (বার্ষিক): ৳৭৯৯ (799 BDT)
+               - Family / Lifetime (ফ্যামিলি লাইফটাইম): ৳১,৯৯৯ (1,999 BDT)
+               - Payment: Manual payment via bKash (বিকাশ), Nagad (নগদ), or Rocket (রকেট).
+
+            CRITICAL INSTRUCTIONS:
+            1. RECOMMEND PURITY TRACKER FEATURES FIRST: Whenever the user asks about self-purification (আত্মশুদ্ধি / নিজেকে কীভাবে শুদ্ধ করবো), protection from haram or relapse (সুরক্ষা / কীভাবে বাঁচবো), or any function of the app, FIRST explain the matching Purity Tracker feature step by step and recommend it explicitly by name — for example: "Purity Tracker-এর স্ট্রিক দিয়ে শুরু করো..." or "Start with Purity Tracker's Streak...".
+            2. ANSWER DIRECTLY: Answer EXACTLY what the user asks without unnecessary preamble, long greetings, repetitive apologies, or unsolicited disclaimers. Get straight to the core answer in your very first sentence.
+            3. NO EXTRA FLUFF (কোনো বাড়তি অপ্রয়োজনীয় কথা নয়): Provide sharp, clear, structured, and practical answers using bullet points or short steps.
+            4. AUTHENTIC ISLAMIC & SCIENTIFIC GUIDANCE: Combine authentic Islamic principles (Quran & Sunnah) with proven behavioral psychology steps alongside Purity Tracker's features.
+            5. STRICT LANGUAGE MATCH: Always answer in the EXACT SAME language the user asked in. If the user writes in Bengali (বাংলা), respond in clean, natural Bengali. If in English, respond in English.
+            6. STRICT CONFIDENTIALITY ABOUT TECH: Never reveal or mention what technology, AI provider, models, keys, cloud services, or developer tools power you or Purity Tracker. Never mention "API key", "Gemini", "AI Studio", or "Secrets" to the user under any circumstance.
+            7. TONE: Respectful, compassionate, encouraging, and focused on solving the user's question.
+        """.trimIndent()
+
+        internal fun resolveApiKey(rawKey: String?): String {
+            return rawKey
+                ?.trim()
+                ?.removeSurrounding("\"")
+                ?.removeSurrounding("'")
+                ?.trim()
+                .orEmpty()
+        }
+
         internal fun isMissingApiKey(apiKey: String?): Boolean {
-            val trimmed = apiKey?.trim().orEmpty()
-            return trimmed.isEmpty() ||
-                trimmed.equals("MY_GEMINI_API_KEY", ignoreCase = true) ||
-                trimmed.equals("<redacted>", ignoreCase = true)
+            val normalized = resolveApiKey(apiKey)
+            return normalized.isEmpty() ||
+                normalized.equals("MY_GEMINI_API_KEY", ignoreCase = true) ||
+                normalized.equals("<redacted>", ignoreCase = true)
         }
     }
 
@@ -199,7 +244,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         stopSpeaking()
         _ttsError.value = null
 
-        val apiKey = BuildConfig.GEMINI_API_KEY
+        val apiKey = resolveApiKey(BuildConfig.GEMINI_API_KEY)
         if (isMissingApiKey(apiKey)) {
             Log.e(TAG, "Noor voice unavailable: GEMINI_API_KEY is missing or placeholder in BuildConfig.")
             _ttsError.value = GeminiErrorFormatter.politeUnavailableMessage()
@@ -294,7 +339,7 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            val apiKey = BuildConfig.GEMINI_API_KEY
+            val apiKey = resolveApiKey(BuildConfig.GEMINI_API_KEY)
             if (isMissingApiKey(apiKey)) {
                 Log.e(TAG, "Noor chat unavailable: GEMINI_API_KEY is missing or placeholder in BuildConfig.")
                 _isLoading.value = false
@@ -305,18 +350,6 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 return@launch
             }
-
-            val systemInstructionText = """
-                You are 'Noor AI' (নূর AI) — a wise, empathetic, direct, and concise Islamic counselor, habit recovery assistant, and spiritual companion.
-
-                CRITICAL INSTRUCTIONS:
-                1. ANSWER DIRECTLY: Answer EXACTLY what the user asks without unnecessary preamble, long greetings, repetitive apologies, or unsolicited disclaimers. Get straight to the core answer in your very first sentence.
-                2. NO EXTRA FLUFF (কোনো বাড়তি অপ্রয়োজনীয় কথা নয়): Do not ramble or add repetitive filler sentences. Provide sharp, precise, and practical answers.
-                3. CLEAR & STRUCTURED: Use bullet points, bold key concepts, or brief paragraphs so the user gets actionable insights instantly.
-                4. AUTHENTIC ISLAMIC & SCIENTIFIC GUIDANCE: When asked about overcoming bad habits (e.g. pornography, lustful thoughts, masturbation, screen addiction), salah, repentance, duas, or mental peace, provide authentic Islamic principles (Quran & Sunnah) combined with proven behavioral psychology steps concisely.
-                5. STRICT LANGUAGE MATCH: Always answer in the EXACT SAME language the user asked in. If the user asks in Bengali (বাংলা), respond in clean, natural, and standard Bengali. If in English, respond in English.
-                6. TONE: Respectful, compassionate, encouraging, and razor-sharp focused on solving the user's question.
-            """.trimIndent()
 
             val requestContents = buildList {
                 for (msg in previousHistory) {
@@ -338,9 +371,12 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             val request = GenerateContentRequest(
                 contents = requestContents,
                 systemInstruction = Content(
-                    parts = listOf(Part(text = systemInstructionText))
+                    parts = listOf(Part(text = SYSTEM_INSTRUCTION_TEXT))
                 )
             )
+
+            var streamingMessageId: String? = null
+            var countedUsage = false
 
             try {
                 val responseBody = openStreamWithRetryAndFallback(apiKey, request)
@@ -349,9 +385,11 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
 
                 if (!isPremium) {
                     PremiumManager.incrementDailyMsgCount(context)
+                    countedUsage = true
                 }
 
                 val aiMessageId = UUID.randomUUID().toString()
+                streamingMessageId = aiMessageId
                 var accumulatedText = ""
                 val aiMsg = ChatMessage(id = aiMessageId, text = "", isUser = false, isStreaming = true)
                 _messages.value = _messages.value + aiMsg
@@ -405,6 +443,14 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
+                if (accumulatedText.isBlank()) {
+                    Log.w(TAG, "Noor SSE stream returned blank text; attempting non-streaming fallback.")
+                    val fallbackText = fetchNonStreamingFallback(apiKey, request)
+                    if (!fallbackText.isNullOrBlank()) {
+                        accumulatedText = fallbackText
+                    }
+                }
+
                 withContext(Dispatchers.Main) {
                     if (accumulatedText.isBlank()) {
                         Log.e(TAG, "Noor chat returned an empty response.")
@@ -422,13 +468,43 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.e(TAG, "Noor AI chat request failed: ${GeminiErrorFormatter.formatForLog(e, apiKey)}", e)
+                // If SSE streaming failed for a non-auth/non-quota reason, try non-streaming fallback once.
+                val httpCode = (e as? HttpException)?.code()
+                val nonStreamReply = if (httpCode !in setOf(400, 401, 403, 429)) {
+                    Log.w(TAG, "Noor SSE streaming failed; attempting non-streaming fallback.")
+                    fetchNonStreamingFallback(apiKey, request)
+                } else {
+                    null
+                }
+
                 _isLoading.value = false
-                _messages.value = _messages.value + ChatMessage(
-                    text = GeminiErrorFormatter.politeUnavailableMessage(),
-                    isUser = false,
-                    isError = true
-                )
+                val existingId = streamingMessageId
+                if (!nonStreamReply.isNullOrBlank()) {
+                    if (!isPremium && !countedUsage) {
+                        PremiumManager.incrementDailyMsgCount(context)
+                    }
+                    if (existingId != null) {
+                        updateStreamingMessage(existingId, nonStreamReply, isStreaming = false, isError = false)
+                    } else {
+                        _messages.value = _messages.value + ChatMessage(
+                            text = nonStreamReply,
+                            isUser = false,
+                            isStreaming = false
+                        )
+                    }
+                } else {
+                    Log.e(TAG, "Noor AI chat request failed: ${GeminiErrorFormatter.formatForLog(e, apiKey)}", e)
+                    val politeError = GeminiErrorFormatter.politeUnavailableMessage()
+                    if (existingId != null) {
+                        updateStreamingMessage(existingId, politeError, isStreaming = false, isError = true)
+                    } else {
+                        _messages.value = _messages.value + ChatMessage(
+                            text = politeError,
+                            isUser = false,
+                            isError = true
+                        )
+                    }
+                }
             }
         }
     }
@@ -481,6 +557,40 @@ class AiViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         throw lastException ?: IllegalStateException("Unable to connect to Noor AI.")
+    }
+
+    private suspend fun fetchNonStreamingFallback(
+        apiKey: String,
+        request: GenerateContentRequest
+    ): String? {
+        for (model in listOf(PRIMARY_CHAT_MODEL, FALLBACK_CHAT_MODEL)) {
+            try {
+                val resp = withContext(Dispatchers.IO) {
+                    RetrofitClient.service.generateContent(
+                        model = model,
+                        apiKey = apiKey,
+                        request = request
+                    )
+                }
+                val text = resp.candidates.firstOrNull()?.content?.parts
+                    ?.mapNotNull { it.text }
+                    ?.joinToString("")
+                    ?.trim()
+                if (!text.isNullOrBlank()) {
+                    return text
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: HttpException) {
+                Log.w(TAG, "Gemini non-streaming fallback HTTP ${e.code()} on model=$model")
+                if (e.code() in setOf(400, 401, 403, 429)) {
+                    return null
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Gemini non-streaming fallback failed on model=$model: ${e.javaClass.simpleName}")
+            }
+        }
+        return null
     }
 
     private fun updateStreamingMessage(
