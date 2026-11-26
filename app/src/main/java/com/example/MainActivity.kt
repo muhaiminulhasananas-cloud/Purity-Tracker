@@ -9134,7 +9134,7 @@ private fun HeroAnimatedBadgeCircle(
         // Inner Round Circle filled 100% by the auto-cropped badge image with breathing pulse
         Box(
             modifier = Modifier
-                .size(97.dp)
+                .size(105.dp)
                 .graphicsLayer {
                     val s = badgePulseScaleState.value
                     scaleX = s
